@@ -3,6 +3,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -12,6 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
+
+type gatewayCacheOpenAIWSSessionLastResponseCapability interface {
+	GetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) (string, error)
+	SetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash, responseID string, ttl time.Duration) error
+	DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error
+}
 
 type GatewayCacheSuite struct {
 	IntegrationRedisSuite
@@ -102,6 +109,35 @@ func (s *GatewayCacheSuite) TestGetSessionAccountID_CorruptedValue() {
 	_, err := s.cache.GetSessionAccountID(s.ctx, groupID, sessionID)
 	require.Error(s.T(), err, "expected error for corrupted value")
 	require.False(s.T(), errors.Is(err, redis.Nil), "expected parsing error, not redis.Nil")
+}
+
+func (s *GatewayCacheSuite) TestOpenAIWSSessionLastResponseLifecycle() {
+	cache, ok := s.cache.(gatewayCacheOpenAIWSSessionLastResponseCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai ws session last response capability")
+
+	sessionID := "ws_session_1"
+	groupID := int64(1)
+	responseID := "resp_123"
+	sessionTTL := 1 * time.Minute
+
+	_, err := cache.GetOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID)
+	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil for missing ws session last response")
+
+	require.NoError(s.T(), cache.SetOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID, responseID, sessionTTL))
+
+	gotResponseID, err := cache.GetOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), responseID, gotResponseID)
+
+	sessionKey := buildOpenAIWSSessionLastResponseKey(groupID, sessionID)
+	ttl, err := s.rdb.TTL(s.ctx, sessionKey).Result()
+	require.NoError(s.T(), err, "TTL ws session last response after Set")
+	s.AssertTTLWithin(ttl, 1*time.Second, sessionTTL)
+
+	require.NoError(s.T(), cache.DeleteOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID))
+
+	_, err = cache.GetOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID)
+	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil after delete")
 }
 
 func TestGatewayCacheSuite(t *testing.T) {

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -10,6 +11,7 @@ import (
 )
 
 const stickySessionPrefix = "sticky_session:"
+const openAIWSSessionLastResponsePrefix = "openai_ws:session_last_response:"
 
 type gatewayCache struct {
 	rdb *redis.Client
@@ -23,6 +25,10 @@ func NewGatewayCache(rdb *redis.Client) service.GatewayCache {
 // 格式: sticky_session:{groupID}:{sessionHash}
 func buildSessionKey(groupID int64, sessionHash string) string {
 	return fmt.Sprintf("%s%d:%s", stickySessionPrefix, groupID, sessionHash)
+}
+
+func buildOpenAIWSSessionLastResponseKey(groupID int64, sessionHash string) string {
+	return fmt.Sprintf("%s%d:%s", openAIWSSessionLastResponsePrefix, groupID, strings.TrimSpace(sessionHash))
 }
 
 func (c *gatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -49,5 +55,20 @@ func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, ses
 // or unschedulable), allowing subsequent requests to select a new available account.
 func (c *gatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	key := buildSessionKey(groupID, sessionHash)
+	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *gatewayCache) GetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) (string, error) {
+	key := buildOpenAIWSSessionLastResponseKey(groupID, sessionHash)
+	return c.rdb.Get(ctx, key).Result()
+}
+
+func (c *gatewayCache) SetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash, responseID string, ttl time.Duration) error {
+	key := buildOpenAIWSSessionLastResponseKey(groupID, sessionHash)
+	return c.rdb.Set(ctx, key, strings.TrimSpace(responseID), ttl).Err()
+}
+
+func (c *gatewayCache) DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error {
+	key := buildOpenAIWSSessionLastResponseKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
 }

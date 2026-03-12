@@ -247,8 +247,9 @@ func (c stubConcurrencyCache) GetAccountWaitingCount(ctx context.Context, accoun
 }
 
 type stubGatewayCache struct {
-	sessionBindings map[string]int64
-	deletedSessions map[string]int
+	sessionBindings             map[string]int64
+	sessionLastResponseBindings map[string]string
+	deletedSessions             map[string]int
 }
 
 func (c *stubGatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -279,6 +280,29 @@ func (c *stubGatewayCache) DeleteSessionAccountID(ctx context.Context, groupID i
 	}
 	c.deletedSessions[sessionHash]++
 	delete(c.sessionBindings, sessionHash)
+	return nil
+}
+
+func (c *stubGatewayCache) GetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) (string, error) {
+	if id, ok := c.sessionLastResponseBindings[sessionHash]; ok {
+		return id, nil
+	}
+	return "", errors.New("not found")
+}
+
+func (c *stubGatewayCache) SetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash, responseID string, ttl time.Duration) error {
+	if c.sessionLastResponseBindings == nil {
+		c.sessionLastResponseBindings = make(map[string]string)
+	}
+	c.sessionLastResponseBindings[sessionHash] = responseID
+	return nil
+}
+
+func (c *stubGatewayCache) DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error {
+	if c.sessionLastResponseBindings == nil {
+		return nil
+	}
+	delete(c.sessionLastResponseBindings, sessionHash)
 	return nil
 }
 
