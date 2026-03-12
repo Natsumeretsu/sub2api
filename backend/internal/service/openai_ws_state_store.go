@@ -50,6 +50,12 @@ type openAIWSSessionLastResponseCache interface {
 	DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error
 }
 
+type openAIWSSessionTurnStateCache interface {
+	GetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) (string, error)
+	SetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error
+	DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error
+}
+
 // OpenAIWSStateStore 管理 WSv2 的粘连状态。
 // - response_id -> account_id 用于续链路由
 // - response_id -> conn_id 用于连接内上下文复用
@@ -244,6 +250,14 @@ func (s *defaultOpenAIWSStateStore) BindSessionTurnState(groupID int64, sessionH
 		expiresAt: time.Now().Add(ttl),
 	}
 	s.sessionToTurnStateMu.Unlock()
+
+	cache := openAIWSSessionTurnStateCacheOf(s.cache)
+	if cache == nil {
+		return
+	}
+	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(context.Background())
+	defer cancel()
+	_ = cache.SetOpenAIWSSessionTurnState(cacheCtx, groupID, sessionHash, state, ttl)
 }
 
 func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHash string) (string, bool) {
@@ -258,7 +272,25 @@ func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHa
 	binding, ok := s.sessionToTurnState[key]
 	s.sessionToTurnStateMu.RUnlock()
 	if !ok || now.After(binding.expiresAt) || strings.TrimSpace(binding.turnState) == "" {
-		return "", false
+		cache := openAIWSSessionTurnStateCacheOf(s.cache)
+		if cache == nil {
+			return "", false
+		}
+		cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(context.Background())
+		defer cancel()
+		state, err := cache.GetOpenAIWSSessionTurnState(cacheCtx, groupID, sessionHash)
+		state = strings.TrimSpace(state)
+		if err != nil || state == "" {
+			return "", false
+		}
+		s.sessionToTurnStateMu.Lock()
+		ensureBindingCapacity(s.sessionToTurnState, key, openAIWSStateStoreMaxEntriesPerMap)
+		s.sessionToTurnState[key] = openAIWSTurnStateBinding{
+			turnState: state,
+			expiresAt: time.Now().Add(openAIWSStateStoreCleanupInterval),
+		}
+		s.sessionToTurnStateMu.Unlock()
+		return state, true
 	}
 	return binding.turnState, true
 }
@@ -271,6 +303,14 @@ func (s *defaultOpenAIWSStateStore) DeleteSessionTurnState(groupID int64, sessio
 	s.sessionToTurnStateMu.Lock()
 	delete(s.sessionToTurnState, key)
 	s.sessionToTurnStateMu.Unlock()
+
+	cache := openAIWSSessionTurnStateCacheOf(s.cache)
+	if cache == nil {
+		return
+	}
+	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(context.Background())
+	defer cancel()
+	_ = cache.DeleteOpenAIWSSessionTurnState(cacheCtx, groupID, sessionHash)
 }
 
 func (s *defaultOpenAIWSStateStore) BindSessionLastResponse(groupID int64, sessionHash, responseID string, ttl time.Duration) {
@@ -540,6 +580,14 @@ func openAIWSSessionLastResponseCacheOf(cache GatewayCache) openAIWSSessionLastR
 		return nil
 	}
 	sessionCache, _ := cache.(openAIWSSessionLastResponseCache)
+	return sessionCache
+}
+
+func openAIWSSessionTurnStateCacheOf(cache GatewayCache) openAIWSSessionTurnStateCache {
+	if cache == nil {
+		return nil
+	}
+	sessionCache, _ := cache.(openAIWSSessionTurnStateCache)
 	return sessionCache
 }
 

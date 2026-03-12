@@ -20,6 +20,12 @@ type gatewayCacheOpenAIWSSessionLastResponseCapability interface {
 	DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error
 }
 
+type gatewayCacheOpenAIWSSessionTurnStateCapability interface {
+	GetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) (string, error)
+	SetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error
+	DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error
+}
+
 type GatewayCacheSuite struct {
 	IntegrationRedisSuite
 	cache service.GatewayCache
@@ -137,6 +143,35 @@ func (s *GatewayCacheSuite) TestOpenAIWSSessionLastResponseLifecycle() {
 	require.NoError(s.T(), cache.DeleteOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID))
 
 	_, err = cache.GetOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID)
+	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil after delete")
+}
+
+func (s *GatewayCacheSuite) TestOpenAIWSSessionTurnStateLifecycle() {
+	cache, ok := s.cache.(gatewayCacheOpenAIWSSessionTurnStateCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai ws session turn state capability")
+
+	sessionID := "ws_session_turn_1"
+	groupID := int64(1)
+	turnState := "turn_state_123"
+	sessionTTL := 1 * time.Minute
+
+	_, err := cache.GetOpenAIWSSessionTurnState(s.ctx, groupID, sessionID)
+	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil for missing ws session turn state")
+
+	require.NoError(s.T(), cache.SetOpenAIWSSessionTurnState(s.ctx, groupID, sessionID, turnState, sessionTTL))
+
+	gotTurnState, err := cache.GetOpenAIWSSessionTurnState(s.ctx, groupID, sessionID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), turnState, gotTurnState)
+
+	sessionKey := buildOpenAIWSSessionTurnStateKey(groupID, sessionID)
+	ttl, err := s.rdb.TTL(s.ctx, sessionKey).Result()
+	require.NoError(s.T(), err, "TTL ws session turn state after Set")
+	s.AssertTTLWithin(ttl, 1*time.Second, sessionTTL)
+
+	require.NoError(s.T(), cache.DeleteOpenAIWSSessionTurnState(s.ctx, groupID, sessionID))
+
+	_, err = cache.GetOpenAIWSSessionTurnState(s.ctx, groupID, sessionID)
 	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil after delete")
 }
 

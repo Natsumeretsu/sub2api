@@ -248,6 +248,7 @@ func (c stubConcurrencyCache) GetAccountWaitingCount(ctx context.Context, accoun
 
 type stubGatewayCache struct {
 	sessionBindings             map[string]int64
+	sessionTurnStateBindings    map[string]string
 	sessionLastResponseBindings map[string]string
 	deletedSessions             map[string]int
 }
@@ -280,6 +281,29 @@ func (c *stubGatewayCache) DeleteSessionAccountID(ctx context.Context, groupID i
 	}
 	c.deletedSessions[sessionHash]++
 	delete(c.sessionBindings, sessionHash)
+	return nil
+}
+
+func (c *stubGatewayCache) GetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) (string, error) {
+	if state, ok := c.sessionTurnStateBindings[sessionHash]; ok {
+		return state, nil
+	}
+	return "", errors.New("not found")
+}
+
+func (c *stubGatewayCache) SetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error {
+	if c.sessionTurnStateBindings == nil {
+		c.sessionTurnStateBindings = make(map[string]string)
+	}
+	c.sessionTurnStateBindings[sessionHash] = turnState
+	return nil
+}
+
+func (c *stubGatewayCache) DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error {
+	if c.sessionTurnStateBindings == nil {
+		return nil
+	}
+	delete(c.sessionTurnStateBindings, sessionHash)
 	return nil
 }
 

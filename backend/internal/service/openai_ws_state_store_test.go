@@ -58,6 +58,23 @@ func TestOpenAIWSStateStore_SessionTurnStateTTL(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestOpenAIWSStateStore_SessionTurnStateFallsBackToCache(t *testing.T) {
+	cache := &stubGatewayCache{}
+	store1 := NewOpenAIWSStateStore(cache)
+	store2 := NewOpenAIWSStateStore(cache)
+
+	store1.BindSessionTurnState(9, "session_hash_turn_cache", "turn_state_cache", time.Minute)
+
+	state, ok := store2.GetSessionTurnState(9, "session_hash_turn_cache")
+	require.True(t, ok)
+	require.Equal(t, "turn_state_cache", state)
+
+	store1.DeleteSessionTurnState(9, "session_hash_turn_cache")
+	store3 := NewOpenAIWSStateStore(cache)
+	_, ok = store3.GetSessionTurnState(9, "session_hash_turn_cache")
+	require.False(t, ok)
+}
+
 func TestOpenAIWSStateStore_SessionLastResponseTTL(t *testing.T) {
 	store := NewOpenAIWSStateStore(nil)
 	store.BindSessionLastResponse(9, "session_hash_resp_1", "resp_last_1", 30*time.Millisecond)
@@ -193,15 +210,22 @@ type openAIWSStateStoreTimeoutProbeCache struct {
 	setHasDeadline             bool
 	getHasDeadline             bool
 	deleteHasDeadline          bool
+	setTurnStateHasDeadline    bool
+	getTurnStateHasDeadline    bool
+	delTurnStateHasDeadline    bool
 	setLastResponseHasDeadline bool
 	getLastResponseHasDeadline bool
 	delLastResponseHasDeadline bool
 	setDeadlineDelta           time.Duration
 	getDeadlineDelta           time.Duration
 	delDeadlineDelta           time.Duration
+	setTurnStateDeadline       time.Duration
+	getTurnStateDeadline       time.Duration
+	delTurnStateDeadline       time.Duration
 	setLastResponseDeadline    time.Duration
 	getLastResponseDeadline    time.Duration
 	delLastResponseDeadline    time.Duration
+	turnStateValue             string
 	lastResponseValue          string
 }
 
@@ -230,6 +254,35 @@ func (c *openAIWSStateStoreTimeoutProbeCache) DeleteSessionAccountID(ctx context
 		c.deleteHasDeadline = true
 		c.delDeadlineDelta = time.Until(deadline)
 	}
+	return nil
+}
+
+func (c *openAIWSStateStoreTimeoutProbeCache) GetOpenAIWSSessionTurnState(ctx context.Context, _ int64, _ string) (string, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		c.getTurnStateHasDeadline = true
+		c.getTurnStateDeadline = time.Until(deadline)
+	}
+	if c.turnStateValue == "" {
+		return "", errors.New("not found")
+	}
+	return c.turnStateValue, nil
+}
+
+func (c *openAIWSStateStoreTimeoutProbeCache) SetOpenAIWSSessionTurnState(ctx context.Context, _ int64, _ string, turnState string, _ time.Duration) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		c.setTurnStateHasDeadline = true
+		c.setTurnStateDeadline = time.Until(deadline)
+	}
+	c.turnStateValue = turnState
+	return nil
+}
+
+func (c *openAIWSStateStoreTimeoutProbeCache) DeleteOpenAIWSSessionTurnState(ctx context.Context, _ int64, _ string) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		c.delTurnStateHasDeadline = true
+		c.delTurnStateDeadline = time.Until(deadline)
+	}
+	c.turnStateValue = ""
 	return nil
 }
 
@@ -296,22 +349,41 @@ func TestOpenAIWSStateStore_RedisOpsUseShortTimeout(t *testing.T) {
 
 	probe3 := &openAIWSStateStoreTimeoutProbeCache{}
 	store3 := NewOpenAIWSStateStore(probe3)
-	store3.BindSessionLastResponse(groupID, "session_hash_resp_timeout", "resp_timeout", time.Minute)
-	responseID, ok := store3.GetSessionLastResponse(groupID, "session_hash_resp_timeout")
+	store3.BindSessionTurnState(groupID, "session_hash_turn_timeout", "turn_timeout", time.Minute)
+	turnState, ok := store3.GetSessionTurnState(groupID, "session_hash_turn_timeout")
+	require.True(t, ok)
+	require.Equal(t, "turn_timeout", turnState)
+	store3.DeleteSessionTurnState(groupID, "session_hash_turn_timeout")
+	_, ok = store3.GetSessionTurnState(groupID, "session_hash_turn_timeout")
+	require.False(t, ok)
+	require.True(t, probe3.setTurnStateHasDeadline, "SetOpenAIWSSessionTurnState 应携带独立超时上下文")
+	require.True(t, probe3.delTurnStateHasDeadline, "DeleteOpenAIWSSessionTurnState 应携带独立超时上下文")
+	require.True(t, probe3.getTurnStateHasDeadline, "GetOpenAIWSSessionTurnState 在本地未命中时应携带独立超时上下文")
+	require.Greater(t, probe3.setTurnStateDeadline, 2*time.Second)
+	require.LessOrEqual(t, probe3.setTurnStateDeadline, 3*time.Second)
+	require.Greater(t, probe3.delTurnStateDeadline, 2*time.Second)
+	require.LessOrEqual(t, probe3.delTurnStateDeadline, 3*time.Second)
+	require.Greater(t, probe3.getTurnStateDeadline, 2*time.Second)
+	require.LessOrEqual(t, probe3.getTurnStateDeadline, 3*time.Second)
+
+	probe4 := &openAIWSStateStoreTimeoutProbeCache{}
+	store4 := NewOpenAIWSStateStore(probe4)
+	store4.BindSessionLastResponse(groupID, "session_hash_resp_timeout", "resp_timeout", time.Minute)
+	responseID, ok := store4.GetSessionLastResponse(groupID, "session_hash_resp_timeout")
 	require.True(t, ok)
 	require.Equal(t, "resp_timeout", responseID)
-	store3.DeleteSessionLastResponse(groupID, "session_hash_resp_timeout")
-	_, ok = store3.GetSessionLastResponse(groupID, "session_hash_resp_timeout")
+	store4.DeleteSessionLastResponse(groupID, "session_hash_resp_timeout")
+	_, ok = store4.GetSessionLastResponse(groupID, "session_hash_resp_timeout")
 	require.False(t, ok)
-	require.True(t, probe3.setLastResponseHasDeadline, "SetOpenAIWSSessionLastResponse 应携带独立超时上下文")
-	require.True(t, probe3.delLastResponseHasDeadline, "DeleteOpenAIWSSessionLastResponse 应携带独立超时上下文")
-	require.True(t, probe3.getLastResponseHasDeadline, "GetOpenAIWSSessionLastResponse 在本地未命中时应携带独立超时上下文")
-	require.Greater(t, probe3.setLastResponseDeadline, 2*time.Second)
-	require.LessOrEqual(t, probe3.setLastResponseDeadline, 3*time.Second)
-	require.Greater(t, probe3.delLastResponseDeadline, 2*time.Second)
-	require.LessOrEqual(t, probe3.delLastResponseDeadline, 3*time.Second)
-	require.Greater(t, probe3.getLastResponseDeadline, 2*time.Second)
-	require.LessOrEqual(t, probe3.getLastResponseDeadline, 3*time.Second)
+	require.True(t, probe4.setLastResponseHasDeadline, "SetOpenAIWSSessionLastResponse 应携带独立超时上下文")
+	require.True(t, probe4.delLastResponseHasDeadline, "DeleteOpenAIWSSessionLastResponse 应携带独立超时上下文")
+	require.True(t, probe4.getLastResponseHasDeadline, "GetOpenAIWSSessionLastResponse 在本地未命中时应携带独立超时上下文")
+	require.Greater(t, probe4.setLastResponseDeadline, 2*time.Second)
+	require.LessOrEqual(t, probe4.setLastResponseDeadline, 3*time.Second)
+	require.Greater(t, probe4.delLastResponseDeadline, 2*time.Second)
+	require.LessOrEqual(t, probe4.delLastResponseDeadline, 3*time.Second)
+	require.Greater(t, probe4.getLastResponseDeadline, 2*time.Second)
+	require.LessOrEqual(t, probe4.getLastResponseDeadline, 3*time.Second)
 }
 
 func TestWithOpenAIWSStateStoreRedisTimeout_WithParentContext(t *testing.T) {

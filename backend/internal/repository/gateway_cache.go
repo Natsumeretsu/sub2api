@@ -12,6 +12,7 @@ import (
 
 const stickySessionPrefix = "sticky_session:"
 const openAIWSSessionLastResponsePrefix = "openai_ws:session_last_response:"
+const openAIWSSessionTurnStatePrefix = "openai_ws:session_turn_state:"
 
 type gatewayCache struct {
 	rdb *redis.Client
@@ -29,6 +30,10 @@ func buildSessionKey(groupID int64, sessionHash string) string {
 
 func buildOpenAIWSSessionLastResponseKey(groupID int64, sessionHash string) string {
 	return fmt.Sprintf("%s%d:%s", openAIWSSessionLastResponsePrefix, groupID, strings.TrimSpace(sessionHash))
+}
+
+func buildOpenAIWSSessionTurnStateKey(groupID int64, sessionHash string) string {
+	return fmt.Sprintf("%s%d:%s", openAIWSSessionTurnStatePrefix, groupID, strings.TrimSpace(sessionHash))
 }
 
 func (c *gatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -70,5 +75,20 @@ func (c *gatewayCache) SetOpenAIWSSessionLastResponse(ctx context.Context, group
 
 func (c *gatewayCache) DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error {
 	key := buildOpenAIWSSessionLastResponseKey(groupID, sessionHash)
+	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *gatewayCache) GetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) (string, error) {
+	key := buildOpenAIWSSessionTurnStateKey(groupID, sessionHash)
+	return c.rdb.Get(ctx, key).Result()
+}
+
+func (c *gatewayCache) SetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error {
+	key := buildOpenAIWSSessionTurnStateKey(groupID, sessionHash)
+	return c.rdb.Set(ctx, key, strings.TrimSpace(turnState), ttl).Err()
+}
+
+func (c *gatewayCache) DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error {
+	key := buildOpenAIWSSessionTurnStateKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
 }
