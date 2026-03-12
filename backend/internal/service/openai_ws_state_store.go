@@ -34,6 +34,11 @@ type openAIWSTurnStateBinding struct {
 	expiresAt time.Time
 }
 
+type openAIWSLastResponseBinding struct {
+	responseID string
+	expiresAt  time.Time
+}
+
 type openAIWSSessionConnBinding struct {
 	connID    string
 	expiresAt time.Time
@@ -58,6 +63,10 @@ type OpenAIWSStateStore interface {
 	GetSessionTurnState(groupID int64, sessionHash string) (string, bool)
 	DeleteSessionTurnState(groupID int64, sessionHash string)
 
+	BindSessionLastResponse(groupID int64, sessionHash, responseID string, ttl time.Duration)
+	GetSessionLastResponse(groupID int64, sessionHash string) (string, bool)
+	DeleteSessionLastResponse(groupID int64, sessionHash string)
+
 	BindSessionConn(groupID int64, sessionHash, connID string, ttl time.Duration)
 	GetSessionConn(groupID int64, sessionHash string) (string, bool)
 	DeleteSessionConn(groupID int64, sessionHash string)
@@ -72,6 +81,8 @@ type defaultOpenAIWSStateStore struct {
 	responseToConn       map[string]openAIWSConnBinding
 	sessionToTurnStateMu sync.RWMutex
 	sessionToTurnState   map[string]openAIWSTurnStateBinding
+	sessionToLastRespMu  sync.RWMutex
+	sessionToLastResp    map[string]openAIWSLastResponseBinding
 	sessionToConnMu      sync.RWMutex
 	sessionToConn        map[string]openAIWSSessionConnBinding
 
@@ -85,6 +96,7 @@ func NewOpenAIWSStateStore(cache GatewayCache) OpenAIWSStateStore {
 		responseToAccount:  make(map[string]openAIWSAccountBinding, 256),
 		responseToConn:     make(map[string]openAIWSConnBinding, 256),
 		sessionToTurnState: make(map[string]openAIWSTurnStateBinding, 256),
+		sessionToLastResp:  make(map[string]openAIWSLastResponseBinding, 256),
 		sessionToConn:      make(map[string]openAIWSSessionConnBinding, 256),
 	}
 	store.lastCleanupUnixNano.Store(time.Now().UnixNano())
@@ -210,7 +222,7 @@ func (s *defaultOpenAIWSStateStore) DeleteResponseConn(responseID string) {
 }
 
 func (s *defaultOpenAIWSStateStore) BindSessionTurnState(groupID int64, sessionHash, turnState string, ttl time.Duration) {
-	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
 	state := strings.TrimSpace(turnState)
 	if key == "" || state == "" {
 		return
@@ -228,7 +240,7 @@ func (s *defaultOpenAIWSStateStore) BindSessionTurnState(groupID int64, sessionH
 }
 
 func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHash string) (string, bool) {
-	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
 	if key == "" {
 		return "", false
 	}
@@ -245,7 +257,7 @@ func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHa
 }
 
 func (s *defaultOpenAIWSStateStore) DeleteSessionTurnState(groupID int64, sessionHash string) {
-	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
 	if key == "" {
 		return
 	}
@@ -254,8 +266,53 @@ func (s *defaultOpenAIWSStateStore) DeleteSessionTurnState(groupID int64, sessio
 	s.sessionToTurnStateMu.Unlock()
 }
 
+func (s *defaultOpenAIWSStateStore) BindSessionLastResponse(groupID int64, sessionHash, responseID string, ttl time.Duration) {
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
+	id := strings.TrimSpace(responseID)
+	if key == "" || id == "" {
+		return
+	}
+	ttl = normalizeOpenAIWSTTL(ttl)
+	s.maybeCleanup()
+
+	s.sessionToLastRespMu.Lock()
+	ensureBindingCapacity(s.sessionToLastResp, key, openAIWSStateStoreMaxEntriesPerMap)
+	s.sessionToLastResp[key] = openAIWSLastResponseBinding{
+		responseID: id,
+		expiresAt:  time.Now().Add(ttl),
+	}
+	s.sessionToLastRespMu.Unlock()
+}
+
+func (s *defaultOpenAIWSStateStore) GetSessionLastResponse(groupID int64, sessionHash string) (string, bool) {
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
+	if key == "" {
+		return "", false
+	}
+	s.maybeCleanup()
+
+	now := time.Now()
+	s.sessionToLastRespMu.RLock()
+	binding, ok := s.sessionToLastResp[key]
+	s.sessionToLastRespMu.RUnlock()
+	if !ok || now.After(binding.expiresAt) || strings.TrimSpace(binding.responseID) == "" {
+		return "", false
+	}
+	return binding.responseID, true
+}
+
+func (s *defaultOpenAIWSStateStore) DeleteSessionLastResponse(groupID int64, sessionHash string) {
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
+	if key == "" {
+		return
+	}
+	s.sessionToLastRespMu.Lock()
+	delete(s.sessionToLastResp, key)
+	s.sessionToLastRespMu.Unlock()
+}
+
 func (s *defaultOpenAIWSStateStore) BindSessionConn(groupID int64, sessionHash, connID string, ttl time.Duration) {
-	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
 	conn := strings.TrimSpace(connID)
 	if key == "" || conn == "" {
 		return
@@ -273,7 +330,7 @@ func (s *defaultOpenAIWSStateStore) BindSessionConn(groupID int64, sessionHash, 
 }
 
 func (s *defaultOpenAIWSStateStore) GetSessionConn(groupID int64, sessionHash string) (string, bool) {
-	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
 	if key == "" {
 		return "", false
 	}
@@ -290,7 +347,7 @@ func (s *defaultOpenAIWSStateStore) GetSessionConn(groupID int64, sessionHash st
 }
 
 func (s *defaultOpenAIWSStateStore) DeleteSessionConn(groupID int64, sessionHash string) {
-	key := openAIWSSessionTurnStateKey(groupID, sessionHash)
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
 	if key == "" {
 		return
 	}
@@ -324,6 +381,10 @@ func (s *defaultOpenAIWSStateStore) maybeCleanup() {
 	s.sessionToTurnStateMu.Lock()
 	cleanupExpiredTurnStateBindings(s.sessionToTurnState, now, openAIWSStateStoreCleanupMaxPerMap)
 	s.sessionToTurnStateMu.Unlock()
+
+	s.sessionToLastRespMu.Lock()
+	cleanupExpiredLastResponseBindings(s.sessionToLastResp, now, openAIWSStateStoreCleanupMaxPerMap)
+	s.sessionToLastRespMu.Unlock()
 
 	s.sessionToConnMu.Lock()
 	cleanupExpiredSessionConnBindings(s.sessionToConn, now, openAIWSStateStoreCleanupMaxPerMap)
@@ -363,6 +424,22 @@ func cleanupExpiredConnBindings(bindings map[string]openAIWSConnBinding, now tim
 }
 
 func cleanupExpiredTurnStateBindings(bindings map[string]openAIWSTurnStateBinding, now time.Time, maxScan int) {
+	if len(bindings) == 0 || maxScan <= 0 {
+		return
+	}
+	scanned := 0
+	for key, binding := range bindings {
+		if now.After(binding.expiresAt) {
+			delete(bindings, key)
+		}
+		scanned++
+		if scanned >= maxScan {
+			break
+		}
+	}
+}
+
+func cleanupExpiredLastResponseBindings(bindings map[string]openAIWSLastResponseBinding, now time.Time, maxScan int) {
 	if len(bindings) == 0 || maxScan <= 0 {
 		return
 	}
@@ -424,7 +501,7 @@ func normalizeOpenAIWSTTL(ttl time.Duration) time.Duration {
 	return ttl
 }
 
-func openAIWSSessionTurnStateKey(groupID int64, sessionHash string) string {
+func openAIWSSessionScopedKey(groupID int64, sessionHash string) string {
 	hash := strings.TrimSpace(sessionHash)
 	if hash == "" {
 		return ""

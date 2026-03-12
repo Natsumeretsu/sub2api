@@ -58,6 +58,22 @@ func TestOpenAIWSStateStore_SessionTurnStateTTL(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestOpenAIWSStateStore_SessionLastResponseTTL(t *testing.T) {
+	store := NewOpenAIWSStateStore(nil)
+	store.BindSessionLastResponse(9, "session_hash_resp_1", "resp_last_1", 30*time.Millisecond)
+
+	responseID, ok := store.GetSessionLastResponse(9, "session_hash_resp_1")
+	require.True(t, ok)
+	require.Equal(t, "resp_last_1", responseID)
+
+	_, ok = store.GetSessionLastResponse(10, "session_hash_resp_1")
+	require.False(t, ok)
+
+	time.Sleep(60 * time.Millisecond)
+	_, ok = store.GetSessionLastResponse(9, "session_hash_resp_1")
+	require.False(t, ok)
+}
+
 func TestOpenAIWSStateStore_SessionConnTTL(t *testing.T) {
 	store := NewOpenAIWSStateStore(nil)
 	store.BindSessionConn(9, "session_hash_conn_1", "conn_1", 30*time.Millisecond)
