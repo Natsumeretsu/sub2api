@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	coderws "github.com/coder/websocket"
@@ -284,6 +285,28 @@ func TestValidateOpenAIWSFunctionCallOutputPayload(t *testing.T) {
 			require.Contains(t, closeErr.Reason(), tt.wantReason)
 		})
 	}
+}
+
+func TestClearOpenAIWSSessionConnBindingIfMatches(t *testing.T) {
+	t.Parallel()
+
+	store := NewOpenAIWSStateStore(nil)
+	groupID := int64(23)
+	sessionHash := "session_hash_cleanup"
+	store.BindSessionConn(groupID, sessionHash, "conn_keep", time.Minute)
+
+	require.False(t, clearOpenAIWSSessionConnBindingIfMatches(nil, groupID, sessionHash, "conn_keep"))
+	require.False(t, clearOpenAIWSSessionConnBindingIfMatches(store, groupID, "", "conn_keep"))
+	require.False(t, clearOpenAIWSSessionConnBindingIfMatches(store, groupID, sessionHash, ""))
+	require.False(t, clearOpenAIWSSessionConnBindingIfMatches(store, groupID, sessionHash, "conn_other"))
+
+	connID, ok := store.GetSessionConn(groupID, sessionHash)
+	require.True(t, ok)
+	require.Equal(t, "conn_keep", connID)
+
+	require.True(t, clearOpenAIWSSessionConnBindingIfMatches(store, groupID, sessionHash, "conn_keep"))
+	_, ok = store.GetSessionConn(groupID, sessionHash)
+	require.False(t, ok)
 }
 
 func TestShouldInferIngressFunctionCallOutputPreviousResponseID(t *testing.T) {

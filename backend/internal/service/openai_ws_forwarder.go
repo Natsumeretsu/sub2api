@@ -1617,6 +1617,28 @@ func validateOpenAIWSFunctionCallOutputPayload(payload []byte) error {
 	)
 }
 
+func clearOpenAIWSSessionConnBindingIfMatches(
+	stateStore OpenAIWSStateStore,
+	groupID int64,
+	sessionHash string,
+	connID string,
+) bool {
+	if stateStore == nil {
+		return false
+	}
+	sessionHash = strings.TrimSpace(sessionHash)
+	connID = strings.TrimSpace(connID)
+	if sessionHash == "" || connID == "" {
+		return false
+	}
+	boundConnID, ok := stateStore.GetSessionConn(groupID, sessionHash)
+	if !ok || strings.TrimSpace(boundConnID) != connID {
+		return false
+	}
+	stateStore.DeleteSessionConn(groupID, sessionHash)
+	return true
+}
+
 func shouldKeepIngressPreviousResponseID(
 	previousPayload []byte,
 	currentPayload []byte,
@@ -2755,6 +2777,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return payload, nil
 	}
 
+	var markBrokenIngressLease func(*openAIWSConnLease, string)
+
 	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string) (*OpenAIForwardResult, error) {
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
@@ -2809,7 +2833,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		for {
 			upstreamMessage, readErr := lease.ReadMessageWithContextTimeout(ctx, s.openAIWSReadTimeout())
 			if readErr != nil {
-				lease.MarkBroken()
+				markBrokenIngressLease(lease, "read_upstream")
 				return nil, wrapOpenAIWSIngressTurnError(
 					"read_upstream",
 					fmt.Errorf("read upstream websocket event: %w", readErr),
@@ -2877,7 +2901,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				// previous_response_not_found 在 ingress 模式支持单次恢复重试：
 				// 不把该 error 直接下发客户端，而是由上层去掉 previous_response_id 后重放当前 turn。
 				if recoverablePrevNotFound {
-					lease.MarkBroken()
+					markBrokenIngressLease(lease, openAIWSIngressStagePreviousResponseNotFound)
 					errMsg := strings.TrimSpace(errMsgRaw)
 					if errMsg == "" {
 						errMsg = "previous response not found"
@@ -2940,7 +2964,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if isTerminalEvent {
 				// 客户端已断连时，上游连接的 session 状态不可信，标记 broken 避免回池复用。
 				if clientDisconnected {
-					lease.MarkBroken()
+					markBrokenIngressLease(lease, "client_disconnected")
 				}
 				firstTokenMsValue := -1
 				if firstTokenMs != nil {
@@ -3015,13 +3039,30 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			pinnedSessionConnID = connID
 		}
 	}
+	markBrokenIngressLease = func(lease *openAIWSConnLease, reason string) {
+		if lease == nil {
+			return
+		}
+		brokenConnID := strings.TrimSpace(lease.ConnID())
+		lease.MarkBroken()
+		if stateStore != nil && storeDisabled && sessionHash != "" &&
+			clearOpenAIWSSessionConnBindingIfMatches(stateStore, groupID, sessionHash, brokenConnID) {
+			logOpenAIWSModeInfo(
+				"ingress_ws_session_conn_cleared account_id=%d conn_id=%s reason=%s session_hash=%s",
+				account.ID,
+				truncateOpenAIWSLogValue(brokenConnID, openAIWSIDValueMaxLen),
+				normalizeOpenAIWSLogValue(reason),
+				truncateOpenAIWSLogValue(sessionHash, 12),
+			)
+		}
+	}
 	releaseSessionLease := func() {
 		if sessionLease == nil {
 			return
 		}
 		if dedicatedMode {
 			// dedicated 会话结束后主动标记损坏，确保连接不会跨会话复用。
-			sessionLease.MarkBroken()
+			markBrokenIngressLease(sessionLease, "dedicated_release")
 		}
 		unpinSessionConn(sessionConnID)
 		sessionLease.Release()
@@ -3052,7 +3093,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return
 		}
 		if markBroken {
-			sessionLease.MarkBroken()
+			markBrokenIngressLease(sessionLease, "session_reset")
 		}
 		releaseSessionLease()
 		sessionLease = nil
@@ -3456,7 +3497,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if hooks != nil && hooks.AfterTurn != nil {
 				hooks.AfterTurn(turn, nil, finalErr)
 			}
-			sessionLease.MarkBroken()
+			markBrokenIngressLease(sessionLease, "after_turn_error")
 			return finalErr
 		}
 		turnRetry = 0
