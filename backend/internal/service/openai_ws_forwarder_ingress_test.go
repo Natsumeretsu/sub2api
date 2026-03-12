@@ -235,6 +235,7 @@ func TestShouldInferIngressFunctionCallOutputPreviousResponseID(t *testing.T) {
 		hasFunctionCallOutput   bool
 		currentPreviousResponse string
 		expectedPrevious        string
+		allowFirstTurn          bool
 		want                    bool
 	}{
 		{
@@ -294,6 +295,15 @@ func TestShouldInferIngressFunctionCallOutputPreviousResponseID(t *testing.T) {
 			expectedPrevious:      "   resp_2   ",
 			want:                  true,
 		},
+		{
+			name:                  "allow_first_turn_when_session_state_provides_anchor",
+			storeDisabled:         true,
+			turn:                  1,
+			hasFunctionCallOutput: true,
+			expectedPrevious:      "resp_session_1",
+			allowFirstTurn:        true,
+			want:                  true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -306,6 +316,7 @@ func TestShouldInferIngressFunctionCallOutputPreviousResponseID(t *testing.T) {
 				tt.hasFunctionCallOutput,
 				tt.currentPreviousResponse,
 				tt.expectedPrevious,
+				tt.allowFirstTurn,
 			)
 			require.Equal(t, tt.want, got)
 		})
