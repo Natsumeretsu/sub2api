@@ -225,6 +225,67 @@ func TestSetPreviousResponseIDToRawPayload(t *testing.T) {
 	})
 }
 
+func TestValidateOpenAIWSFunctionCallOutputPayload(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		payload     []byte
+		wantReason  string
+		expectError bool
+	}{
+		{
+			name:        "no_function_call_output",
+			payload:     []byte(`{"type":"response.create","model":"gpt-5.1","input":[{"type":"input_text","text":"hello"}]}`),
+			expectError: false,
+		},
+		{
+			name:        "previous_response_id_satisfies_context",
+			payload:     []byte(`{"type":"response.create","model":"gpt-5.1","previous_response_id":"resp_1","input":[{"type":"function_call_output","output":"ok"}]}`),
+			expectError: false,
+		},
+		{
+			name:        "tool_call_context_satisfies_context",
+			payload:     []byte(`{"type":"response.create","model":"gpt-5.1","input":[{"type":"function_call","call_id":"call_1","name":"tool_a","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`),
+			expectError: false,
+		},
+		{
+			name:        "item_reference_satisfies_context",
+			payload:     []byte(`{"type":"response.create","model":"gpt-5.1","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"},{"type":"item_reference","id":"call_1"}]}`),
+			expectError: false,
+		},
+		{
+			name:        "missing_call_id_without_previous_response_id",
+			payload:     []byte(`{"type":"response.create","model":"gpt-5.1","input":[{"type":"function_call_output","output":"ok"}]}`),
+			wantReason:  "function_call_output requires call_id or previous_response_id",
+			expectError: true,
+		},
+		{
+			name:        "missing_item_reference_without_context",
+			payload:     []byte(`{"type":"response.create","model":"gpt-5.1","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`),
+			wantReason:  "function_call_output requires item_reference ids matching each call_id",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateOpenAIWSFunctionCallOutputPayload(tt.payload)
+			if !tt.expectError {
+				require.NoError(t, err)
+				return
+			}
+
+			require.Error(t, err)
+			var closeErr *OpenAIWSClientCloseError
+			require.ErrorAs(t, err, &closeErr)
+			require.Equal(t, coderws.StatusPolicyViolation, closeErr.StatusCode())
+			require.Contains(t, closeErr.Reason(), tt.wantReason)
+		})
+	}
+}
+
 func TestShouldInferIngressFunctionCallOutputPreviousResponseID(t *testing.T) {
 	t.Parallel()
 

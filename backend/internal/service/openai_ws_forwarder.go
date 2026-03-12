@@ -1578,6 +1578,45 @@ func setOpenAIWSPayloadInputSequence(
 	return sjson.SetRawBytes(payload, "input", inputRaw)
 }
 
+func validateOpenAIWSFunctionCallOutputPayload(payload []byte) error {
+	if len(payload) == 0 || !gjson.GetBytes(payload, `input.#(type=="function_call_output")`).Exists() {
+		return nil
+	}
+
+	var reqBody map[string]any
+	if err := json.Unmarshal(payload, &reqBody); err != nil {
+		// 维持与 HTTP 入口一致的容错语义：解析失败时不额外拦截，交给后续通用校验。
+		return nil
+	}
+
+	validation := ValidateFunctionCallOutputContext(reqBody)
+	if !validation.HasFunctionCallOutput {
+		return nil
+	}
+
+	previousResponseID, _ := reqBody["previous_response_id"].(string)
+	if strings.TrimSpace(previousResponseID) != "" || validation.HasToolCallContext {
+		return nil
+	}
+
+	if validation.HasFunctionCallOutputMissingCallID {
+		return NewOpenAIWSClientCloseError(
+			coderws.StatusPolicyViolation,
+			"function_call_output requires call_id or previous_response_id; if relying on history, ensure store=true and reuse previous_response_id",
+			nil,
+		)
+	}
+	if validation.HasItemReferenceForAllCallIDs {
+		return nil
+	}
+
+	return NewOpenAIWSClientCloseError(
+		coderws.StatusPolicyViolation,
+		"function_call_output requires item_reference ids matching each call_id, or previous_response_id/tool_call context; if relying on history, ensure store=true and reuse previous_response_id",
+		nil,
+	)
+}
+
 func shouldKeepIngressPreviousResponseID(
 	previousPayload []byte,
 	currentPayload []byte,
@@ -3158,6 +3197,24 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					expectedPrevFromSessionState,
 				)
 			}
+		}
+		if validationErr := validateOpenAIWSFunctionCallOutputPayload(currentPayload); validationErr != nil {
+			closeReason := "invalid_function_call_output_context"
+			var closeErr *OpenAIWSClientCloseError
+			if errors.As(validationErr, &closeErr) && closeErr != nil && strings.TrimSpace(closeErr.Reason()) != "" {
+				closeReason = closeErr.Reason()
+			}
+			logOpenAIWSModeInfo(
+				"ingress_ws_function_call_output_validation_failed account_id=%d turn=%d conn_id=%s reason=%s has_function_call_output=%v has_previous_response_id=%v from_session_state=%v",
+				account.ID,
+				turn,
+				truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+				truncateOpenAIWSLogValue(closeReason, openAIWSLogValueMaxLen),
+				hasFunctionCallOutput,
+				currentPreviousResponseID != "",
+				expectedPrevFromSessionState,
+			)
+			return validationErr
 		}
 		nextReplayInput, nextReplayInputExists, replayInputErr := buildOpenAIWSReplayInputSequence(
 			lastTurnReplayInput,
