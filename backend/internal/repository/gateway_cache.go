@@ -68,6 +68,11 @@ func (c *gatewayCache) GetOpenAIWSSessionLastResponse(ctx context.Context, group
 	return c.rdb.Get(ctx, key).Result()
 }
 
+func (c *gatewayCache) GetOpenAIWSSessionLastResponseWithTTL(ctx context.Context, groupID int64, sessionHash string) (string, time.Duration, error) {
+	key := buildOpenAIWSSessionLastResponseKey(groupID, sessionHash)
+	return c.getStringWithTTL(ctx, key)
+}
+
 func (c *gatewayCache) SetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash, responseID string, ttl time.Duration) error {
 	key := buildOpenAIWSSessionLastResponseKey(groupID, sessionHash)
 	return c.rdb.Set(ctx, key, strings.TrimSpace(responseID), ttl).Err()
@@ -83,6 +88,11 @@ func (c *gatewayCache) GetOpenAIWSSessionTurnState(ctx context.Context, groupID 
 	return c.rdb.Get(ctx, key).Result()
 }
 
+func (c *gatewayCache) GetOpenAIWSSessionTurnStateWithTTL(ctx context.Context, groupID int64, sessionHash string) (string, time.Duration, error) {
+	key := buildOpenAIWSSessionTurnStateKey(groupID, sessionHash)
+	return c.getStringWithTTL(ctx, key)
+}
+
 func (c *gatewayCache) SetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error {
 	key := buildOpenAIWSSessionTurnStateKey(groupID, sessionHash)
 	return c.rdb.Set(ctx, key, strings.TrimSpace(turnState), ttl).Err()
@@ -91,4 +101,16 @@ func (c *gatewayCache) SetOpenAIWSSessionTurnState(ctx context.Context, groupID 
 func (c *gatewayCache) DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error {
 	key := buildOpenAIWSSessionTurnStateKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *gatewayCache) getStringWithTTL(ctx context.Context, key string) (string, time.Duration, error) {
+	value, err := c.rdb.Get(ctx, key).Result()
+	if err != nil {
+		return "", 0, err
+	}
+	ttl, err := c.rdb.PTTL(ctx, key).Result()
+	if err != nil {
+		return "", 0, err
+	}
+	return value, ttl, nil
 }

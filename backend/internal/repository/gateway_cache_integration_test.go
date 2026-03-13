@@ -20,10 +20,18 @@ type gatewayCacheOpenAIWSSessionLastResponseCapability interface {
 	DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error
 }
 
+type gatewayCacheOpenAIWSSessionLastResponseTTLCapability interface {
+	GetOpenAIWSSessionLastResponseWithTTL(ctx context.Context, groupID int64, sessionHash string) (string, time.Duration, error)
+}
+
 type gatewayCacheOpenAIWSSessionTurnStateCapability interface {
 	GetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) (string, error)
 	SetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error
 	DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error
+}
+
+type gatewayCacheOpenAIWSSessionTurnStateTTLCapability interface {
+	GetOpenAIWSSessionTurnStateWithTTL(ctx context.Context, groupID int64, sessionHash string) (string, time.Duration, error)
 }
 
 type GatewayCacheSuite struct {
@@ -146,6 +154,25 @@ func (s *GatewayCacheSuite) TestOpenAIWSSessionLastResponseLifecycle() {
 	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil after delete")
 }
 
+func (s *GatewayCacheSuite) TestOpenAIWSSessionLastResponseGetWithTTL() {
+	cache, ok := s.cache.(gatewayCacheOpenAIWSSessionLastResponseCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai ws session last response capability")
+	ttlCache, ok := s.cache.(gatewayCacheOpenAIWSSessionLastResponseTTLCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai ws session last response ttl capability")
+
+	sessionID := "ws_session_ttl_resp_1"
+	groupID := int64(1)
+	responseID := "resp_ttl_123"
+	sessionTTL := 1 * time.Minute
+
+	require.NoError(s.T(), cache.SetOpenAIWSSessionLastResponse(s.ctx, groupID, sessionID, responseID, sessionTTL))
+
+	gotResponseID, ttl, err := ttlCache.GetOpenAIWSSessionLastResponseWithTTL(s.ctx, groupID, sessionID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), responseID, gotResponseID)
+	s.AssertTTLWithin(ttl, 1*time.Second, sessionTTL)
+}
+
 func (s *GatewayCacheSuite) TestOpenAIWSSessionTurnStateLifecycle() {
 	cache, ok := s.cache.(gatewayCacheOpenAIWSSessionTurnStateCapability)
 	require.True(s.T(), ok, "gateway cache should expose optional openai ws session turn state capability")
@@ -173,6 +200,25 @@ func (s *GatewayCacheSuite) TestOpenAIWSSessionTurnStateLifecycle() {
 
 	_, err = cache.GetOpenAIWSSessionTurnState(s.ctx, groupID, sessionID)
 	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil after delete")
+}
+
+func (s *GatewayCacheSuite) TestOpenAIWSSessionTurnStateGetWithTTL() {
+	cache, ok := s.cache.(gatewayCacheOpenAIWSSessionTurnStateCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai ws session turn state capability")
+	ttlCache, ok := s.cache.(gatewayCacheOpenAIWSSessionTurnStateTTLCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai ws session turn state ttl capability")
+
+	sessionID := "ws_session_ttl_turn_1"
+	groupID := int64(1)
+	turnState := "turn_state_ttl_123"
+	sessionTTL := 1 * time.Minute
+
+	require.NoError(s.T(), cache.SetOpenAIWSSessionTurnState(s.ctx, groupID, sessionID, turnState, sessionTTL))
+
+	gotTurnState, ttl, err := ttlCache.GetOpenAIWSSessionTurnStateWithTTL(s.ctx, groupID, sessionID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), turnState, gotTurnState)
+	s.AssertTTLWithin(ttl, 1*time.Second, sessionTTL)
 }
 
 func TestGatewayCacheSuite(t *testing.T) {

@@ -39,7 +39,7 @@
 | Surface | 当前状态 | `previous_response_id` | 工具回合策略 | 状态来源 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | WSv2 `ctx_pool/passthrough` 普通 turn | `strong` | 默认保留；必要时可对齐或单次降级 | 文本 turn 可做受控恢复 | 本地 turn + 会话状态 + 连接提示 | 当前主承诺面 |
-| WSv2 `store=false` + `function_call_output` | `strong` | 优先对齐；必要时单次 fresh-conn 恢复 | 本地校验 -> 有锚点恢复 -> 自包含单次重试 -> 否则 fail-close | `last_response_id`、`turn_state`、连接亲和 | 当前 continuation hardening 主覆盖面 |
+| WSv2 `store=false` + `function_call_output` | `strong` | 优先对齐；必要时单次 fresh-conn 恢复 | 本地校验 -> 有锚点恢复 -> 自包含单次重试 -> 否则 fail-close | `last_response_id`、`turn_state`、连接亲和 | 当前 continuation hardening 主覆盖面；会话状态从共享缓存回填本地时会跟随共享剩余 TTL |
 | WSv2 `store=true` | `degraded-strong` | 允许依赖上游 history | 本地仍做基础校验，但更偏透传 | 上游 history + 本地辅助状态 | 语义更依赖上游 |
 | HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；部分路径会移除或不依赖 `previous_response_id` | 以 handler 前置校验为主 | 请求体 + 上游 | 不承诺与 WSv2 等价 |
 | HTTP `/v1/responses/compact` | `degraded` | compact 单独规范化 | 不做 replay merge | compact 请求体 + 上游 | 不能假装与普通 `/responses` 完全等价 |
@@ -66,7 +66,8 @@
 4. 无本地锚点但 payload 自包含时的单次自包含重试
 5. 无锚点且不自包含时的明确 fail-close
 6. 会话级 `last_response_id` / `turn_state` 状态面
-7. 不做 transcript replay
+7. 共享缓存回填本地时尊重共享剩余 TTL，不额外放大本地寿命
+8. 不做 transcript replay
 
 ### 3.2 当前明确不承诺的点
 

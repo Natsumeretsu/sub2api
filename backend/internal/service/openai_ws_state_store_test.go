@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,22 @@ func TestOpenAIWSStateStore_SessionTurnStateFallsBackToCache(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestOpenAIWSStateStore_SessionTurnStateFallbackDoesNotOutliveSharedTTL(t *testing.T) {
+	cache := newTTLAwareOpenAIWSCacheStub()
+	store1 := NewOpenAIWSStateStore(cache)
+	store2 := NewOpenAIWSStateStore(cache)
+
+	store1.BindSessionTurnState(9, "session_hash_turn_ttl", "turn_state_ttl", 40*time.Millisecond)
+
+	state, ok := store2.GetSessionTurnState(9, "session_hash_turn_ttl")
+	require.True(t, ok)
+	require.Equal(t, "turn_state_ttl", state)
+
+	time.Sleep(80 * time.Millisecond)
+	_, ok = store2.GetSessionTurnState(9, "session_hash_turn_ttl")
+	require.False(t, ok, "从共享缓存回填的本地 turn_state 不应活过共享 TTL")
+}
+
 func TestOpenAIWSStateStore_SessionLastResponseTTL(t *testing.T) {
 	store := NewOpenAIWSStateStore(nil)
 	store.BindSessionLastResponse(9, "session_hash_resp_1", "resp_last_1", 30*time.Millisecond)
@@ -106,6 +123,22 @@ func TestOpenAIWSStateStore_SessionLastResponseFallsBackToCache(t *testing.T) {
 	store3 := NewOpenAIWSStateStore(cache)
 	_, ok = store3.GetSessionLastResponse(9, "session_hash_resp_cache")
 	require.False(t, ok)
+}
+
+func TestOpenAIWSStateStore_SessionLastResponseFallbackDoesNotOutliveSharedTTL(t *testing.T) {
+	cache := newTTLAwareOpenAIWSCacheStub()
+	store1 := NewOpenAIWSStateStore(cache)
+	store2 := NewOpenAIWSStateStore(cache)
+
+	store1.BindSessionLastResponse(9, "session_hash_resp_ttl", "resp_last_ttl", 40*time.Millisecond)
+
+	responseID, ok := store2.GetSessionLastResponse(9, "session_hash_resp_ttl")
+	require.True(t, ok)
+	require.Equal(t, "resp_last_ttl", responseID)
+
+	time.Sleep(80 * time.Millisecond)
+	_, ok = store2.GetSessionLastResponse(9, "session_hash_resp_ttl")
+	require.False(t, ok, "从共享缓存回填的本地 last_response 不应活过共享 TTL")
 }
 
 func TestOpenAIWSStateStore_SessionConnTTL(t *testing.T) {
@@ -261,6 +294,105 @@ type openAIWSStateStoreTimeoutProbeCache struct {
 	delLastResponseDeadline    time.Duration
 	turnStateValue             string
 	lastResponseValue          string
+}
+
+type ttlAwareOpenAIWSCacheStub struct {
+	turnStateBindings    map[string]ttlAwareOpenAIWSStringBinding
+	lastResponseBindings map[string]ttlAwareOpenAIWSStringBinding
+}
+
+type ttlAwareOpenAIWSStringBinding struct {
+	value     string
+	expiresAt time.Time
+}
+
+func newTTLAwareOpenAIWSCacheStub() *ttlAwareOpenAIWSCacheStub {
+	return &ttlAwareOpenAIWSCacheStub{
+		turnStateBindings:    make(map[string]ttlAwareOpenAIWSStringBinding),
+		lastResponseBindings: make(map[string]ttlAwareOpenAIWSStringBinding),
+	}
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) GetSessionAccountID(context.Context, int64, string) (int64, error) {
+	return 0, errors.New("not found")
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) SetSessionAccountID(context.Context, int64, string, int64, time.Duration) error {
+	return nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) RefreshSessionTTL(context.Context, int64, string, time.Duration) error {
+	return nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) DeleteSessionAccountID(context.Context, int64, string) error {
+	return nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) GetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) (string, error) {
+	state, _, err := c.GetOpenAIWSSessionTurnStateWithTTL(ctx, groupID, sessionHash)
+	return state, err
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) GetOpenAIWSSessionTurnStateWithTTL(_ context.Context, groupID int64, sessionHash string) (string, time.Duration, error) {
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
+	binding, ok := c.turnStateBindings[key]
+	if !ok {
+		return "", 0, errors.New("not found")
+	}
+	ttl := time.Until(binding.expiresAt)
+	if ttl <= 0 || strings.TrimSpace(binding.value) == "" {
+		delete(c.turnStateBindings, key)
+		return "", 0, errors.New("not found")
+	}
+	return binding.value, ttl, nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) SetOpenAIWSSessionTurnState(_ context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error {
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
+	c.turnStateBindings[key] = ttlAwareOpenAIWSStringBinding{
+		value:     strings.TrimSpace(turnState),
+		expiresAt: time.Now().Add(ttl),
+	}
+	return nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) DeleteOpenAIWSSessionTurnState(_ context.Context, groupID int64, sessionHash string) error {
+	delete(c.turnStateBindings, openAIWSSessionScopedKey(groupID, sessionHash))
+	return nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) GetOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) (string, error) {
+	responseID, _, err := c.GetOpenAIWSSessionLastResponseWithTTL(ctx, groupID, sessionHash)
+	return responseID, err
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) GetOpenAIWSSessionLastResponseWithTTL(_ context.Context, groupID int64, sessionHash string) (string, time.Duration, error) {
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
+	binding, ok := c.lastResponseBindings[key]
+	if !ok {
+		return "", 0, errors.New("not found")
+	}
+	ttl := time.Until(binding.expiresAt)
+	if ttl <= 0 || strings.TrimSpace(binding.value) == "" {
+		delete(c.lastResponseBindings, key)
+		return "", 0, errors.New("not found")
+	}
+	return binding.value, ttl, nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) SetOpenAIWSSessionLastResponse(_ context.Context, groupID int64, sessionHash, responseID string, ttl time.Duration) error {
+	key := openAIWSSessionScopedKey(groupID, sessionHash)
+	c.lastResponseBindings[key] = ttlAwareOpenAIWSStringBinding{
+		value:     strings.TrimSpace(responseID),
+		expiresAt: time.Now().Add(ttl),
+	}
+	return nil
+}
+
+func (c *ttlAwareOpenAIWSCacheStub) DeleteOpenAIWSSessionLastResponse(_ context.Context, groupID int64, sessionHash string) error {
+	delete(c.lastResponseBindings, openAIWSSessionScopedKey(groupID, sessionHash))
+	return nil
 }
 
 func (c *openAIWSStateStoreTimeoutProbeCache) GetSessionAccountID(ctx context.Context, _ int64, _ string) (int64, error) {

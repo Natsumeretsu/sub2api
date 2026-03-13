@@ -168,6 +168,7 @@ OpenAI 官方文档指向两个核心事实：
 - 本地锚点已对齐但 upstream 仍判 stale 时，仅自包含 payload 允许单次 drop-`previous_response_id` 重试
 - 无本地锚点时，如果 payload 自包含，则允许单次 drop-`previous_response_id` 重试
 - 无本地锚点且 payload 不自包含，则明确 fail-close
+- `session_hash -> last_response_id / turn_state` 从共享缓存回填本地时，使用共享剩余 TTL，而不是额外延长本地寿命
 
 ### 4.2 暂不实施
 

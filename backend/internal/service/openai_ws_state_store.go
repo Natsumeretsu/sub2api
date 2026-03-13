@@ -50,10 +50,18 @@ type openAIWSSessionLastResponseCache interface {
 	DeleteOpenAIWSSessionLastResponse(ctx context.Context, groupID int64, sessionHash string) error
 }
 
+type openAIWSSessionLastResponseTTLCache interface {
+	GetOpenAIWSSessionLastResponseWithTTL(ctx context.Context, groupID int64, sessionHash string) (string, time.Duration, error)
+}
+
 type openAIWSSessionTurnStateCache interface {
 	GetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) (string, error)
 	SetOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash, turnState string, ttl time.Duration) error
 	DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error
+}
+
+type openAIWSSessionTurnStateTTLCache interface {
+	GetOpenAIWSSessionTurnStateWithTTL(ctx context.Context, groupID int64, sessionHash string) (string, time.Duration, error)
 }
 
 // OpenAIWSStateStore 管理 WSv2 的粘连状态。
@@ -328,18 +336,11 @@ func (s *defaultOpenAIWSStateStore) GetSessionTurnState(groupID int64, sessionHa
 		}
 		cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(context.Background())
 		defer cancel()
-		state, err := cache.GetOpenAIWSSessionTurnState(cacheCtx, groupID, sessionHash)
-		state = strings.TrimSpace(state)
-		if err != nil || state == "" {
+		state, ttl, ok := getOpenAIWSSessionTurnStateFromCache(cacheCtx, cache, groupID, sessionHash)
+		if !ok {
 			return "", false
 		}
-		s.sessionToTurnStateMu.Lock()
-		ensureBindingCapacity(s.sessionToTurnState, key, openAIWSStateStoreMaxEntriesPerMap)
-		s.sessionToTurnState[key] = openAIWSTurnStateBinding{
-			turnState: state,
-			expiresAt: time.Now().Add(openAIWSStateStoreCleanupInterval),
-		}
-		s.sessionToTurnStateMu.Unlock()
+		s.rehydrateSessionTurnStateLocal(key, state, ttl)
 		return state, true
 	}
 	return binding.turnState, true
@@ -411,18 +412,11 @@ func (s *defaultOpenAIWSStateStore) GetSessionLastResponse(groupID int64, sessio
 		}
 		cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(context.Background())
 		defer cancel()
-		responseID, err := cache.GetOpenAIWSSessionLastResponse(cacheCtx, groupID, sessionHash)
-		responseID = strings.TrimSpace(responseID)
-		if err != nil || responseID == "" {
+		responseID, ttl, ok := getOpenAIWSSessionLastResponseFromCache(cacheCtx, cache, groupID, sessionHash)
+		if !ok {
 			return "", false
 		}
-		s.sessionToLastRespMu.Lock()
-		ensureBindingCapacity(s.sessionToLastResp, key, openAIWSStateStoreMaxEntriesPerMap)
-		s.sessionToLastResp[key] = openAIWSLastResponseBinding{
-			responseID: responseID,
-			expiresAt:  time.Now().Add(openAIWSStateStoreCleanupInterval),
-		}
-		s.sessionToLastRespMu.Unlock()
+		s.rehydrateSessionLastResponseLocal(key, responseID, ttl)
 		return responseID, true
 	}
 	return binding.responseID, true
@@ -496,6 +490,32 @@ func (s *defaultOpenAIWSStateStore) DeleteSessionConn(groupID int64, sessionHash
 		s.sessionConnDeleteTotal.Add(1)
 	}
 	s.sessionToConnMu.Unlock()
+}
+
+func (s *defaultOpenAIWSStateStore) rehydrateSessionTurnStateLocal(key, turnState string, ttl time.Duration) {
+	if strings.TrimSpace(key) == "" || strings.TrimSpace(turnState) == "" || ttl <= 0 {
+		return
+	}
+	s.sessionToTurnStateMu.Lock()
+	ensureBindingCapacity(s.sessionToTurnState, key, openAIWSStateStoreMaxEntriesPerMap)
+	s.sessionToTurnState[key] = openAIWSTurnStateBinding{
+		turnState: turnState,
+		expiresAt: time.Now().Add(ttl),
+	}
+	s.sessionToTurnStateMu.Unlock()
+}
+
+func (s *defaultOpenAIWSStateStore) rehydrateSessionLastResponseLocal(key, responseID string, ttl time.Duration) {
+	if strings.TrimSpace(key) == "" || strings.TrimSpace(responseID) == "" || ttl <= 0 {
+		return
+	}
+	s.sessionToLastRespMu.Lock()
+	ensureBindingCapacity(s.sessionToLastResp, key, openAIWSStateStoreMaxEntriesPerMap)
+	s.sessionToLastResp[key] = openAIWSLastResponseBinding{
+		responseID: responseID,
+		expiresAt:  time.Now().Add(ttl),
+	}
+	s.sessionToLastRespMu.Unlock()
 }
 
 func (s *defaultOpenAIWSStateStore) DebugSnapshot() OpenAIWSStateStoreDebugSnapshot {
@@ -704,12 +724,62 @@ func openAIWSSessionLastResponseCacheOf(cache GatewayCache) openAIWSSessionLastR
 	return sessionCache
 }
 
+func openAIWSSessionLastResponseTTLCacheOf(cache openAIWSSessionLastResponseCache) openAIWSSessionLastResponseTTLCache {
+	if cache == nil {
+		return nil
+	}
+	ttlCache, _ := cache.(openAIWSSessionLastResponseTTLCache)
+	return ttlCache
+}
+
 func openAIWSSessionTurnStateCacheOf(cache GatewayCache) openAIWSSessionTurnStateCache {
 	if cache == nil {
 		return nil
 	}
 	sessionCache, _ := cache.(openAIWSSessionTurnStateCache)
 	return sessionCache
+}
+
+func openAIWSSessionTurnStateTTLCacheOf(cache openAIWSSessionTurnStateCache) openAIWSSessionTurnStateTTLCache {
+	if cache == nil {
+		return nil
+	}
+	ttlCache, _ := cache.(openAIWSSessionTurnStateTTLCache)
+	return ttlCache
+}
+
+func getOpenAIWSSessionLastResponseFromCache(ctx context.Context, cache openAIWSSessionLastResponseCache, groupID int64, sessionHash string) (string, time.Duration, bool) {
+	if ttlCache := openAIWSSessionLastResponseTTLCacheOf(cache); ttlCache != nil {
+		responseID, ttl, err := ttlCache.GetOpenAIWSSessionLastResponseWithTTL(ctx, groupID, sessionHash)
+		responseID = strings.TrimSpace(responseID)
+		if err != nil || responseID == "" {
+			return "", 0, false
+		}
+		return responseID, ttl, true
+	}
+	responseID, err := cache.GetOpenAIWSSessionLastResponse(ctx, groupID, sessionHash)
+	responseID = strings.TrimSpace(responseID)
+	if err != nil || responseID == "" {
+		return "", 0, false
+	}
+	return responseID, openAIWSStateStoreCleanupInterval, true
+}
+
+func getOpenAIWSSessionTurnStateFromCache(ctx context.Context, cache openAIWSSessionTurnStateCache, groupID int64, sessionHash string) (string, time.Duration, bool) {
+	if ttlCache := openAIWSSessionTurnStateTTLCacheOf(cache); ttlCache != nil {
+		turnState, ttl, err := ttlCache.GetOpenAIWSSessionTurnStateWithTTL(ctx, groupID, sessionHash)
+		turnState = strings.TrimSpace(turnState)
+		if err != nil || turnState == "" {
+			return "", 0, false
+		}
+		return turnState, ttl, true
+	}
+	turnState, err := cache.GetOpenAIWSSessionTurnState(ctx, groupID, sessionHash)
+	turnState = strings.TrimSpace(turnState)
+	if err != nil || turnState == "" {
+		return "", 0, false
+	}
+	return turnState, openAIWSStateStoreCleanupInterval, true
 }
 
 func normalizeOpenAIWSTTL(ttl time.Duration) time.Duration {
