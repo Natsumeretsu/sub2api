@@ -810,6 +810,53 @@ func TestOpenAIHandleFailoverRetryBlockedAfterEmit_RecordsStatsWithoutOverwritin
 	require.Equal(t, `{"partial":true}`, w.Body.String())
 }
 
+func TestIsOpenAIRemoteCompactProtocolFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("compact 502 with compact upstream message", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+		err := &service.UpstreamFailoverError{
+			StatusCode:   http.StatusBadGateway,
+			ResponseBody: []byte(`{"error":{"message":"Upstream compact stream disconnected before completion"}}`),
+		}
+		require.True(t, isOpenAIRemoteCompactProtocolFailover(c, err))
+	})
+
+	t.Run("non compact path does not match", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		err := &service.UpstreamFailoverError{
+			StatusCode:   http.StatusBadGateway,
+			ResponseBody: []byte(`{"error":{"message":"Upstream compact stream disconnected before completion"}}`),
+		}
+		require.False(t, isOpenAIRemoteCompactProtocolFailover(c, err))
+	})
+
+	t.Run("compact path but generic upstream message does not match", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+		err := &service.UpstreamFailoverError{
+			StatusCode:   http.StatusBadGateway,
+			ResponseBody: []byte(`{"error":{"message":"Upstream service temporarily unavailable"}}`),
+		}
+		require.False(t, isOpenAIRemoteCompactProtocolFailover(c, err))
+	})
+}
+
+func TestBuildOpenAIRemoteCompactUnsupportedFailover(t *testing.T) {
+	err := buildOpenAIRemoteCompactUnsupportedFailover(&service.Account{
+		Type:     service.AccountTypeAPIKey,
+		Platform: service.PlatformOpenAI,
+	})
+	require.Equal(t, http.StatusServiceUnavailable, err.StatusCode)
+	require.Contains(t, string(err.ResponseBody), "responses_compact_supported=true")
+	require.False(t, err.RetryableOnSameAccount)
+}
+
 // TestOpenAIHandler_GjsonExtraction 验证 gjson 从请求体中提取 model/stream 的正确性
 func TestOpenAIHandler_GjsonExtraction(t *testing.T) {
 	tests := []struct {

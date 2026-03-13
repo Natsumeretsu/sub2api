@@ -793,6 +793,22 @@ func (a *Account) GetOpenAIBaseURL() string {
 	return "https://api.openai.com"
 }
 
+func (a *Account) SupportsOpenAIResponsesCompact() bool {
+	if !a.IsOpenAI() {
+		return false
+	}
+	if a.IsOpenAIOAuth() {
+		return true
+	}
+	if !a.IsOpenAIApiKey() {
+		return false
+	}
+	if enabled, ok := a.getBoolCredential("responses_compact_supported"); ok {
+		return enabled
+	}
+	return false
+}
+
 func (a *Account) GetOpenAIAccessToken() string {
 	if !a.IsOpenAI() {
 		return ""
@@ -826,6 +842,30 @@ func (a *Account) GetOpenAIUserAgent() string {
 		return ""
 	}
 	return a.GetCredential("user_agent")
+}
+
+func (a *Account) getBoolCredential(key string) (bool, bool) {
+	if a == nil || a.Credentials == nil {
+		return false, false
+	}
+	raw, ok := a.Credentials[key]
+	if !ok || raw == nil {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return false, false
+		}
+		parsed, err := strconv.ParseBool(trimmed)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
 }
 
 func (a *Account) GetChatGPTAccountID() string {

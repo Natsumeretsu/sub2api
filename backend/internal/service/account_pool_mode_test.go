@@ -115,3 +115,45 @@ func TestGetPoolModeRetryCount(t *testing.T) {
 		})
 	}
 }
+
+func TestSupportsOpenAIResponsesCompact(t *testing.T) {
+	t.Run("oauth accounts support compact by default", func(t *testing.T) {
+		account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI}
+		require.True(t, account.SupportsOpenAIResponsesCompact())
+	})
+
+	t.Run("apikey accounts require explicit opt in", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{
+				"base_url": "https://codex-api.packycode.com/v1",
+			},
+		}
+		require.False(t, account.SupportsOpenAIResponsesCompact())
+	})
+
+	t.Run("apikey accounts honor bool credential", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{
+				"base_url":                    "https://codex-api.packycode.com/v1",
+				"responses_compact_supported": true,
+			},
+		}
+		require.True(t, account.SupportsOpenAIResponsesCompact())
+	})
+
+	t.Run("apikey accounts honor string credential", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{
+				"base_url":                    "https://codex-api.packycode.com/v1",
+				"responses_compact_supported": "true",
+			},
+		}
+		require.True(t, account.SupportsOpenAIResponsesCompact())
+	})
+}

@@ -392,6 +392,31 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.RecordOpenAIWSContinuationCacheAffinitySelection()
 		}
 		account := selection.Account
+		if isOpenAIRemoteCompactPath(c) && !account.SupportsOpenAIResponsesCompact() {
+			failoverErr := buildOpenAIRemoteCompactUnsupportedFailover(account)
+			lastFailoverErr = failoverErr
+			failedAccountIDs[account.ID] = struct{}{}
+			if switchCount >= maxAccountSwitches {
+				reqLog.Warn("openai.remote_compact_account_unsupported",
+					zap.Int64("account_id", account.ID),
+					zap.String("account_name", account.Name),
+					zap.String("account_type", account.Type),
+					zap.String("base_url", account.GetOpenAIBaseURL()),
+				)
+				h.handleFailoverExhausted(c, failoverErr, streamStarted)
+				return
+			}
+			switchCount++
+			reqLog.Warn("openai.remote_compact_account_unsupported_switching",
+				zap.Int64("account_id", account.ID),
+				zap.String("account_name", account.Name),
+				zap.String("account_type", account.Type),
+				zap.String("base_url", account.GetOpenAIBaseURL()),
+				zap.Int("switch_count", switchCount),
+				zap.Int("max_switches", maxAccountSwitches),
+			)
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
@@ -428,6 +453,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				if openAIResponsesTurnStarted(c, streamStarted) {
 					turnEmitted = true
 					h.handleOpenAIFailoverRetryBlockedAfterEmit(c, reqLog, account.ID, turnKey, failoverErr, streamStarted)
+					return
+				}
+				if isOpenAIRemoteCompactProtocolFailover(c, failoverErr) {
+					lastFailoverErr = failoverErr
+					reqLog.Warn("openai.remote_compact_protocol_failfast",
+						zap.Int64("account_id", account.ID),
+						zap.Int("upstream_status", failoverErr.StatusCode),
+						zap.String("upstream_message", strings.TrimSpace(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody))),
+					)
+					h.handleFailoverExhausted(c, failoverErr, streamStarted)
 					return
 				}
 				// 池模式：同账号重试
@@ -538,6 +573,26 @@ func isOpenAIRemoteCompactPath(c *gin.Context) bool {
 	}
 	normalizedPath := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
 	return strings.HasSuffix(normalizedPath, "/responses/compact")
+}
+
+func isOpenAIRemoteCompactProtocolFailover(c *gin.Context, failoverErr *service.UpstreamFailoverError) bool {
+	if !isOpenAIRemoteCompactPath(c) || failoverErr == nil || failoverErr.StatusCode != http.StatusBadGateway {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody)))
+	return strings.Contains(msg, "upstream compact")
+}
+
+func buildOpenAIRemoteCompactUnsupportedFailover(account *service.Account) *service.UpstreamFailoverError {
+	message := "Remote compact is not supported by the selected account; use an OAuth Codex-compatible account or explicitly set responses_compact_supported=true after verification"
+	if account != nil && account.IsOpenAIOAuth() {
+		message = "Remote compact is not supported by the selected account"
+	}
+	payload := []byte(`{"error":{"type":"gateway_capability_error","message":` + strconv.Quote(message) + `}}`)
+	return &service.UpstreamFailoverError{
+		StatusCode:   http.StatusServiceUnavailable,
+		ResponseBody: payload,
+	}
 }
 
 func (h *OpenAIGatewayHandler) logOpenAIRemoteCompactOutcome(c *gin.Context, startedAt time.Time) {
