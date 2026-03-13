@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 )
 
@@ -172,6 +173,35 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 	}
 
+	// Generate session hash (header first; fallback to prompt_cache_key)
+	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
+	anchor := h.gatewayService.ResolveOpenAIWSContinuationAnchor(c.Request.Context(), apiKey.GroupID, sessionHash, previousResponseID)
+	if previousResponseID == "" && anchor.FromSessionState && anchor.PreviousResponseID != "" {
+		nextBody, setErr := sjson.SetBytes(body, "previous_response_id", anchor.PreviousResponseID)
+		if setErr != nil {
+			reqLog.Warn("openai.previous_response_recovery_failed", zap.Error(setErr))
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to recover previous_response_id from session state")
+			return
+		}
+		body = nextBody
+		previousResponseID = anchor.PreviousResponseID
+		service.RecordOpenAIWSContinuationPreviousResponseRecoveredFromSession()
+		reqLog = reqLog.With(
+			zap.Bool("previous_response_id_recovered", true),
+			zap.String("previous_response_id_recovered_source", "session_last_response"),
+		)
+	}
+	if anchor.StrongCohort {
+		c.Set(service.OpenAIContinuationStrongCohortCtxKey, true)
+		if service.GetOpenAIClientTransport(c) == service.OpenAIClientTransportHTTP {
+			service.RecordOpenAIWSContinuationWSToHTTPMidSession()
+			reqLog = reqLog.With(zap.Bool("http_mid_session_degrade", true))
+		}
+	}
+	if anchor.FromSessionState && previousResponseID != "" {
+		c.Set(service.OpenAIContinuationPrevRecoveredCtxKey, true)
+	}
+
 	setOpsRequestContext(c, reqModel, reqStream, body)
 
 	// 提前校验 function_call_output 是否具备可关联上下文，避免上游 400。
@@ -207,8 +237,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	// Generate session hash (header first; fallback to prompt_cache_key)
-	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
+	requiredTransport := service.ResolveOpenAIWSRequiredTransportForAnchor(anchor)
 
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -226,7 +255,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			sessionHash,
 			reqModel,
 			failedAccountIDs,
-			service.OpenAIUpstreamTransportAny,
+			requiredTransport,
 		)
 		if err != nil {
 			reqLog.Warn("openai.account_select_failed",
@@ -250,6 +279,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		if previousResponseID != "" && selection != nil && selection.Account != nil {
 			reqLog.Debug("openai.account_selected_with_previous_response_id", zap.Int64("account_id", selection.Account.ID))
+		}
+		if anchor.StickyAccountID > 0 && selection != nil && selection.Account != nil && selection.Account.ID != anchor.StickyAccountID {
+			service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
+			reqLog = reqLog.With(
+				zap.Bool("account_switch_with_cache_drop", true),
+				zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
+			)
 		}
 		reqLog.Debug("openai.account_schedule_decision",
 			zap.String("layer", scheduleDecision.Layer),

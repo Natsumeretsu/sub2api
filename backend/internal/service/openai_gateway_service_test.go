@@ -539,6 +539,41 @@ func TestOpenAISelectAccountWithLoadAwareness_StickyRecoveredFromLastResponse(t 
 	}
 }
 
+func TestOpenAIGatewayService_ResolveOpenAIWSContinuationAnchor_RecoversPreviousResponseFromSessionState(t *testing.T) {
+	groupID := int64(9)
+	sessionHash := "session-anchor-recover"
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.StickySessionTTLSeconds = 1800
+	cfg.Gateway.OpenAIWS.StickyResponseIDTTLSeconds = 3600
+
+	svc := &OpenAIGatewayService{
+		cache: &stubGatewayCache{sessionBindings: map[string]int64{}},
+		cfg:   cfg,
+	}
+
+	store := svc.getOpenAIWSStateStore()
+	require.NotNil(t, store)
+	store.BindSessionLastResponse(groupID, sessionHash, "resp_anchor_1", time.Hour)
+	require.NoError(t, store.BindResponseAccount(context.Background(), groupID, "resp_anchor_1", 23, time.Hour))
+
+	anchor := svc.ResolveOpenAIWSContinuationAnchor(context.Background(), &groupID, sessionHash, "")
+	require.Equal(t, "resp_anchor_1", anchor.PreviousResponseID)
+	require.Equal(t, int64(23), anchor.StickyAccountID)
+	require.True(t, anchor.FromSessionState)
+	require.True(t, anchor.StrongCohort)
+}
+
+func TestResolveOpenAIWSRequiredTransportForAnchor(t *testing.T) {
+	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, ResolveOpenAIWSRequiredTransportForAnchor(OpenAIWSContinuationAnchor{
+		StrongCohort: true,
+	}))
+	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIWSRequiredTransportForAnchor(OpenAIWSContinuationAnchor{}))
+}
+
 func TestOpenAISelectAccountForModelWithExclusions_NoModelSupport(t *testing.T) {
 	repo := stubOpenAIAccountRepo{
 		accounts: []Account{

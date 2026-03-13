@@ -43,6 +43,10 @@ const (
 
 	// OpenAIParsedRequestBodyKey 缓存 handler 侧已解析的请求体，避免重复解析。
 	OpenAIParsedRequestBodyKey = "openai_parsed_request_body"
+	// OpenAIContinuationStrongCohortCtxKey 标记当前请求是否属于“强 continuation 会话”。
+	OpenAIContinuationStrongCohortCtxKey = "openai_continuation_strong_cohort"
+	// OpenAIContinuationPrevRecoveredCtxKey 标记当前请求的 previous_response_id 是否从共享会话状态回填。
+	OpenAIContinuationPrevRecoveredCtxKey = "openai_continuation_prev_recovered"
 	// OpenAI WS Mode 失败后的重连次数上限（不含首次尝试）。
 	// 与 Codex 客户端保持一致：失败后最多重连 5 次。
 	openAIWSReconnectRetryLimit = 5
@@ -1054,6 +1058,88 @@ func (s *OpenAIGatewayService) GenerateSessionHashWithFallback(c *gin.Context, b
 	return currentHash
 }
 
+type OpenAIWSContinuationAnchor struct {
+	PreviousResponseID string
+	StickyAccountID    int64
+	FromSessionState   bool
+	StrongCohort       bool
+}
+
+func (s *OpenAIGatewayService) ResolveOpenAIWSContinuationAnchor(
+	ctx context.Context,
+	groupID *int64,
+	sessionHash string,
+	currentPreviousResponseID string,
+) OpenAIWSContinuationAnchor {
+	anchor := OpenAIWSContinuationAnchor{
+		PreviousResponseID: strings.TrimSpace(currentPreviousResponseID),
+	}
+	if anchor.PreviousResponseID != "" {
+		anchor.StrongCohort = true
+	}
+
+	stickyAccountID, _, _ := s.resolveOpenAIWSStickyAccountIDForSession(ctx, groupID, sessionHash)
+	if stickyAccountID > 0 {
+		anchor.StickyAccountID = stickyAccountID
+		anchor.StrongCohort = true
+	}
+
+	if anchor.PreviousResponseID != "" || strings.TrimSpace(sessionHash) == "" {
+		return anchor
+	}
+
+	stateStore := s.getOpenAIWSStateStore()
+	if stateStore == nil {
+		return anchor
+	}
+	if savedLastResponseID, ok := stateStore.GetSessionLastResponse(derefGroupID(groupID), sessionHash); ok {
+		savedLastResponseID = strings.TrimSpace(savedLastResponseID)
+		if savedLastResponseID != "" {
+			anchor.PreviousResponseID = savedLastResponseID
+			anchor.FromSessionState = true
+			anchor.StrongCohort = true
+		}
+	}
+	return anchor
+}
+
+func ResolveOpenAIWSRequiredTransportForAnchor(anchor OpenAIWSContinuationAnchor) OpenAIUpstreamTransport {
+	if anchor.StrongCohort {
+		return OpenAIUpstreamTransportResponsesWebsocketV2
+	}
+	return OpenAIUpstreamTransportAny
+}
+
+func IsOpenAIContinuationStrongCohort(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	raw, ok := c.Get(OpenAIContinuationStrongCohortCtxKey)
+	if !ok {
+		return false
+	}
+	strong, _ := raw.(bool)
+	return strong
+}
+
+func openAIRequestBodyTrimmedString(reqBody map[string]any, key string) string {
+	if len(reqBody) == 0 {
+		return ""
+	}
+	raw, ok := reqBody[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
 func resolveOpenAIUpstreamOriginator(c *gin.Context, isOfficialClient bool) string {
 	if c != nil {
 		if originator := strings.TrimSpace(c.GetHeader("originator")); originator != "" {
@@ -1863,12 +1949,25 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	// 仅在 WSv2 模式保留 previous_response_id，其他模式（HTTP/WSv1）统一过滤。
-	// 注意：该规则同样适用于 Codex CLI 请求，避免 WSv1 向上游透传不支持字段。
+	// UX-first: 对已进入强 continuation cohort 的会话，在 HTTP 降级路径上尽量保留 previous_response_id，
+	// 避免静默打断续链并放大输入 token；其余弱会话仍保持原有过滤行为。
 	if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 		if _, has := reqBody["previous_response_id"]; has {
-			delete(reqBody, "previous_response_id")
-			bodyModified = true
-			markPatchDelete("previous_response_id")
+			if IsOpenAIContinuationStrongCohort(c) && GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP {
+				logOpenAIWSModeInfo(
+					"http_mid_session_previous_response_preserved account_id=%d transport=%s reason=strong_continuation_cohort previous_response_id_kind=%s",
+					account.ID,
+					normalizeOpenAIWSLogValue(string(wsDecision.Transport)),
+					normalizeOpenAIWSLogValue(ClassifyOpenAIPreviousResponseIDKind(openAIRequestBodyTrimmedString(reqBody, "previous_response_id"))),
+				)
+			} else {
+				delete(reqBody, "previous_response_id")
+				bodyModified = true
+				markPatchDelete("previous_response_id")
+				if IsOpenAIContinuationStrongCohort(c) {
+					RecordOpenAIWSContinuationPreviousResponseStrippedMidSession()
+				}
+			}
 		}
 	}
 

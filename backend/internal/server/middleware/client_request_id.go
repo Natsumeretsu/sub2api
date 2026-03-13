@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -26,11 +27,22 @@ func ClientRequestID() gin.HandlerFunc {
 			return
 		}
 
-		id := uuid.New().String()
+		id := resolveClientRequestID(c.Request)
 		ctx := context.WithValue(c.Request.Context(), ctxkey.ClientRequestID, id)
 		requestLogger := logger.FromContext(ctx).With(zap.String("client_request_id", strings.TrimSpace(id)))
 		ctx = logger.IntoContext(ctx, requestLogger)
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
 	}
+}
+
+func resolveClientRequestID(r *http.Request) string {
+	if r != nil {
+		for _, key := range []string{"X-Client-Request-ID", "Client-Request-ID"} {
+			if value := strings.TrimSpace(r.Header.Get(key)); value != "" {
+				return value
+			}
+		}
+	}
+	return uuid.New().String()
 }

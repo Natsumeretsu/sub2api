@@ -10,6 +10,10 @@ import (
 type OpenAIWSContinuationStatsSnapshot struct {
 	ValidationRejectMissingCallIDTotal        int64
 	ValidationRejectMissingItemReferenceTotal int64
+	WSToHTTPMidSessionTotal                   int64
+	PreviousResponseRecoveredFromSessionTotal int64
+	PreviousResponseStrippedMidSessionTotal   int64
+	AccountSwitchWithCacheDropTotal           int64
 	SessionStickyRebindFromLastResponseTotal  int64
 	PrevNotFoundAlignRetryTotal               int64
 	PrevNotFoundDropRetryTotal                int64
@@ -26,6 +30,10 @@ type OpenAIWSContinuationStatsSnapshot struct {
 var (
 	openAIWSContinuationValidationRejectMissingCallIDTotal        atomic.Int64
 	openAIWSContinuationValidationRejectMissingItemReferenceTotal atomic.Int64
+	openAIWSContinuationWSToHTTPMidSessionTotal                   atomic.Int64
+	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal atomic.Int64
+	openAIWSContinuationPreviousResponseStrippedMidSessionTotal   atomic.Int64
+	openAIWSContinuationAccountSwitchWithCacheDropTotal           atomic.Int64
 	openAIWSContinuationSessionStickyRebindFromLastResponseTotal  atomic.Int64
 	openAIWSContinuationPrevNotFoundAlignRetryTotal               atomic.Int64
 	openAIWSContinuationPrevNotFoundDropRetryTotal                atomic.Int64
@@ -43,6 +51,10 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 	return OpenAIWSContinuationStatsSnapshot{
 		ValidationRejectMissingCallIDTotal:        openAIWSContinuationValidationRejectMissingCallIDTotal.Load(),
 		ValidationRejectMissingItemReferenceTotal: openAIWSContinuationValidationRejectMissingItemReferenceTotal.Load(),
+		WSToHTTPMidSessionTotal:                   openAIWSContinuationWSToHTTPMidSessionTotal.Load(),
+		PreviousResponseRecoveredFromSessionTotal: openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Load(),
+		PreviousResponseStrippedMidSessionTotal:   openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Load(),
+		AccountSwitchWithCacheDropTotal:           openAIWSContinuationAccountSwitchWithCacheDropTotal.Load(),
 		SessionStickyRebindFromLastResponseTotal:  openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Load(),
 		PrevNotFoundAlignRetryTotal:               openAIWSContinuationPrevNotFoundAlignRetryTotal.Load(),
 		PrevNotFoundDropRetryTotal:                openAIWSContinuationPrevNotFoundDropRetryTotal.Load(),
@@ -72,6 +84,22 @@ func RecordOpenAIWSContinuationValidationReject(reason string) {
 	case "function_call_output_missing_item_reference":
 		recordOpenAIWSContinuationValidationRejectMissingItemReference()
 	}
+}
+
+func RecordOpenAIWSContinuationWSToHTTPMidSession() {
+	openAIWSContinuationWSToHTTPMidSessionTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationPreviousResponseRecoveredFromSession() {
+	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationPreviousResponseStrippedMidSession() {
+	openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationAccountSwitchWithCacheDrop() {
+	openAIWSContinuationAccountSwitchWithCacheDropTotal.Add(1)
 }
 
 func recordOpenAIWSContinuationSessionStickyRebindFromLastResponse() {
@@ -121,6 +149,10 @@ func recordOpenAIWSContinuationPreflightPingFailClosed(reason string) {
 func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationValidationRejectMissingCallIDTotal.Store(0)
 	openAIWSContinuationValidationRejectMissingItemReferenceTotal.Store(0)
+	openAIWSContinuationWSToHTTPMidSessionTotal.Store(0)
+	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Store(0)
+	openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Store(0)
+	openAIWSContinuationAccountSwitchWithCacheDropTotal.Store(0)
 	openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Store(0)
 	openAIWSContinuationPrevNotFoundAlignRetryTotal.Store(0)
 	openAIWSContinuationPrevNotFoundDropRetryTotal.Store(0)

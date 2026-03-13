@@ -55,6 +55,25 @@ func TestClientRequestID_PreservesExisting(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 }
 
+func TestClientRequestID_UsesInboundHeaderWhenPresent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.Use(ClientRequestID())
+	r.GET("/t", func(c *gin.Context) {
+		id, ok := c.Request.Context().Value(ctxkey.ClientRequestID).(string)
+		require.True(t, ok)
+		require.Equal(t, "creq-header-1", id)
+		c.Status(http.StatusOK)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/t", nil)
+	req.Header.Set("X-Client-Request-ID", "creq-header-1")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestRequestBodyLimit_LimitsBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

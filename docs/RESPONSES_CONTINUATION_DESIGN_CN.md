@@ -170,6 +170,9 @@ OpenAI 官方文档指向两个核心事实：
 - 无本地锚点且 payload 不自包含，则明确 fail-close
 - `session_hash -> last_response_id / turn_state` 从共享缓存回填本地时，使用共享剩余 TTL，而不是额外延长本地寿命
 - 当 `session_hash -> account_id` 粘连缺失，但 `session_hash -> last_response_id` 与 `response_id -> account_id` 仍可用时，优先从共享响应状态恢复 sticky account，并回填会话级粘连
+- HTTP 中途降级进入 `Responses(...)` 时，如果会话仍属于强 continuation cohort，则在账号选择前优先从共享会话状态回填 `previous_response_id`，并把 `requiredTransport` 收紧到 `WSv2`
+- 对强 continuation cohort 的 HTTP 中途降级，不再默认静默剥离 `previous_response_id`；只有弱会话或明确不满足 cohort 条件时才继续走旧的 strip 行为
+- `client_request_id` 中间件现在优先接受客户端显式传入的 `X-Client-Request-ID` / `Client-Request-ID`，再退回本地生成 UUID，作为后续 turn 级幂等键的最小基础
 
 ### 4.2 暂不实施
 
@@ -190,6 +193,10 @@ OpenAI 官方文档指向两个核心事实：
 - 明确区分 `WSv2 / HTTP / legacy / compact`
 - 输出 capability matrix，而不是把所有 transport 当同一种 continuation
 - 增加以下指标：
+  - `ws_to_http_mid_session_total`
+  - `previous_response_recovered_from_session_total`
+  - `previous_response_id_stripped_mid_session_total`
+  - `account_switch_with_cache_drop_total`
   - fail-close 原因
   - stale anchor 对齐次数
   - self-contained retry 次数
