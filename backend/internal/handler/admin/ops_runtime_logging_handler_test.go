@@ -77,6 +77,7 @@ func newOpsRuntimeRouter(handler *OpsHandler, withUser bool) *gin.Engine {
 			c.Next()
 		})
 	}
+	r.GET("/runtime/continuation", handler.GetRuntimeContinuationStats)
 	r.GET("/runtime/logging", handler.GetRuntimeLogConfig)
 	r.PUT("/runtime/logging", handler.UpdateRuntimeLogConfig)
 	r.POST("/runtime/logging/reset", handler.ResetRuntimeLogConfig)
@@ -124,6 +125,42 @@ func TestOpsRuntimeLoggingHandler_GetConfig(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d, want 200", w.Code)
+	}
+}
+
+func TestOpsRuntimeLoggingHandler_GetContinuationStats(t *testing.T) {
+	h := NewOpsHandler(newRuntimeOpsService(t))
+	r := newOpsRuntimeRouter(h, false)
+
+	before := service.OpenAIWSContinuationStats()
+	service.RecordOpenAIWSContinuationValidationReject("function_call_output_missing_call_id")
+	after := service.OpenAIWSContinuationStats()
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/runtime/continuation", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200, body=%s", w.Code, w.Body.String())
+	}
+
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			Source   string                                    `json:"source"`
+			OpenAIWS service.OpenAIWSContinuationStatsSnapshot `json:"openai_ws"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal runtime continuation stats: %v", err)
+	}
+	if payload.Code != 0 {
+		t.Fatalf("code=%d, want 0", payload.Code)
+	}
+	if payload.Data.Source != "process_local" {
+		t.Fatalf("source=%q, want process_local", payload.Data.Source)
+	}
+	if payload.Data.OpenAIWS.ValidationRejectMissingCallIDTotal != after.ValidationRejectMissingCallIDTotal {
+		t.Fatalf("validation reject count = %d, want %d (before=%d)", payload.Data.OpenAIWS.ValidationRejectMissingCallIDTotal, after.ValidationRejectMissingCallIDTotal, before.ValidationRejectMissingCallIDTotal)
 	}
 }
 

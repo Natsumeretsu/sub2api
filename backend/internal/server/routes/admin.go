@@ -119,6 +119,7 @@ func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		{
 			runtime.GET("/alert", h.Admin.Ops.GetAlertRuntimeSettings)
 			runtime.PUT("/alert", h.Admin.Ops.UpdateAlertRuntimeSettings)
+			runtime.GET("/continuation", h.Admin.Ops.GetRuntimeContinuationStats)
 			runtime.GET("/logging", h.Admin.Ops.GetRuntimeLogConfig)
 			runtime.PUT("/logging", h.Admin.Ops.UpdateRuntimeLogConfig)
 			runtime.POST("/logging/reset", h.Admin.Ops.ResetRuntimeLogConfig)

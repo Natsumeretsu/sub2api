@@ -122,6 +122,15 @@ func (h *OpsHandler) GetRuntimeLogConfig(c *gin.Context) {
 	response.Success(c, cfg)
 }
 
+// GetRuntimeContinuationStats returns lightweight process-local continuation stats.
+// GET /api/v1/admin/ops/runtime/continuation
+func (h *OpsHandler) GetRuntimeContinuationStats(c *gin.Context) {
+	response.Success(c, gin.H{
+		"source":    "process_local",
+		"openai_ws": service.OpenAIWSContinuationStats(),
+	})
+}
+
 // UpdateRuntimeLogConfig updates runtime log config and applies changes immediately.
 // PUT /api/v1/admin/ops/runtime/logging
 func (h *OpsHandler) UpdateRuntimeLogConfig(c *gin.Context) {

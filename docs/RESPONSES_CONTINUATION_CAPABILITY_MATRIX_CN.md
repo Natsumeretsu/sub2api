@@ -96,7 +96,7 @@
 
 - 回归测试验证
 - 运行时快速诊断
-- 为后续 admin/debug surface 做准备
+- 提供一个只读 admin/debug surface：`GET /api/v1/admin/ops/runtime/continuation`
 
 当前还**没有**承诺：
 
