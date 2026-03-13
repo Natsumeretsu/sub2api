@@ -74,10 +74,39 @@ export interface OpsRuntimeContinuationStateSnapshot {
   redis_timeout_ms: number
 }
 
+export interface OpsRuntimeContinuationGroupCapabilitySnapshot {
+  group_id: number
+  group_name: string
+  total_schedulable_openai_accounts: number
+  oauth_schedulable_accounts: number
+  apikey_schedulable_accounts: number
+  compact_capable_accounts: number
+  compact_incapable_accounts: number
+  strong_cohort_accounts: number
+  degraded_only_accounts: number
+  compact_capable_account_names?: string[]
+  compact_incapable_account_names?: string[]
+  strong_cohort_account_names?: string[]
+  degraded_only_account_names?: string[]
+}
+
+export interface OpsRuntimeContinuationCapabilitySnapshot {
+  global_total_openai_accounts: number
+  global_compact_capable_accounts: number
+  global_strong_cohort_accounts: number
+  global_degraded_only_accounts: number
+  global_compact_incapable_accounts: number
+  has_any_compact_capable_account: boolean
+  has_any_strong_cohort_account: boolean
+  has_any_degraded_only_account: boolean
+  groups: OpsRuntimeContinuationGroupCapabilitySnapshot[]
+}
+
 export interface OpsRuntimeContinuationSnapshot {
   counters: OpsRuntimeContinuationStatsSnapshot
   config: OpsRuntimeContinuationConfigSnapshot
   state: OpsRuntimeContinuationStateSnapshot
+  capability: OpsRuntimeContinuationCapabilitySnapshot
 }
 
 export interface OpsRuntimeContinuationResponse {

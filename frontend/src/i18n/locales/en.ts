@@ -3544,6 +3544,48 @@ export default {
         continuation: {
           title: 'Continuation Runtime',
           description: 'Shows the current WSv2 continuation strategy, recovery counters, and local state snapshot so operators can tell whether the gateway is preserving, degrading, or fail-closing a turn.',
+          capability: {
+            title: 'Account capability and cohort availability',
+            description: 'Shows the compact capability and strong/degraded cohort mix for schedulable OpenAI accounts so operators can immediately see why a group is fast-failing.',
+            labels: {
+              compact: 'Compact capability',
+              cohort: 'Cohort availability'
+            },
+            summary: {
+              compact: {
+                empty: 'No accounts',
+                none: 'None supported',
+                partial: '{count}/{total} supported',
+                full: '{count}/{total} supported'
+              },
+              compactEmptyDesc: 'There are no schedulable OpenAI accounts, so remote compact capability cannot be assessed yet.',
+              compactNoneDesc: 'All schedulable OpenAI accounts currently reject remote compact, so requests will fast-fail instead of burning tokens on retries.',
+              compactPartialDesc: '{count} accounts still do not support compact. Route compact traffic toward supported accounts first to avoid the fast-fail pool.',
+              compactFullDesc: 'All schedulable OpenAI accounts currently support remote compact, so there is no obvious capability gap on that surface.',
+              cohort: {
+                empty: 'No cohort',
+                none: 'No strong cohort',
+                partial: '{count}/{total} strong',
+                full: '{count}/{total} strong'
+              },
+              cohortEmptyDesc: 'There are no schedulable OpenAI accounts, so no cohort is currently available.',
+              cohortNoneDesc: 'There is no strong continuation cohort right now. All available accounts are on the degraded surface, which hurts continuation and cache affinity.',
+              cohortPartialDesc: 'Only part of the pool remains in the strong cohort. {count} accounts are still on the degraded surface.',
+              cohortFullDesc: 'All schedulable OpenAI accounts are currently in the strong cohort, so continuation and cache affinity can be preserved first.'
+            },
+            group: {
+              compactCapableShort: 'compact',
+              strongShort: 'strong',
+              healthyDesc: 'This group currently has OAuth={oauth} and API key={apikey}; both compact and strong continuation are available for normal traffic.',
+              mixedDesc: 'This group only partially supports compact or still contains degraded candidates: compact {compact}/{total}, degraded {degraded}. Compact-incapable accounts: {names}.',
+              fastFailDesc: 'This group has zero compact capability but still has {strong} strong-cohort accounts. Continuation may still hold, but compact can only fast-fail. OAuth={oauth}, API key={apikey}. Compact-incapable accounts: {names}.',
+              status: {
+                success: 'Ready',
+                info: 'Needs routing',
+                warning: 'Fast-fail'
+              }
+            }
+          },
           source: 'Snapshot source',
           diagnosisRulesTitle: 'Diagnosis rules',
           nextActionsTitle: 'Suggested next actions',

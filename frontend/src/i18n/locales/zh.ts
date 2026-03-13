@@ -3717,6 +3717,48 @@ export default {
         continuation: {
           title: 'Continuation 运行时',
           description: '展示 WSv2 continuation 的当前策略、恢复计数和本地状态快照，便于判断当前是保链、降级还是 fail-close。',
+          capability: {
+            title: '账号能力与 cohort 可用性',
+            description: '展示当前可调度 OpenAI 账号的 compact 能力和 strong/degraded cohort 分布，方便快速判断为什么某个分组只能 fast-fail。',
+            labels: {
+              compact: 'Compact 能力',
+              cohort: 'Cohort 可用性'
+            },
+            summary: {
+              compact: {
+                empty: '暂无账号',
+                none: '全部不支持',
+                partial: '{count}/{total} 支持',
+                full: '{count}/{total} 支持'
+              },
+              compactEmptyDesc: '当前没有可调度的 OpenAI 账号，因此无法判断 remote compact 能力。',
+              compactNoneDesc: '当前所有可调度 OpenAI 账号都不支持 remote compact，请求会直接 fast-fail，而不是继续白烧 token。',
+              compactPartialDesc: '当前仍有 {count} 个账号不支持 compact；管理员应优先把 compact 流量导向支持账号，避免落到 fast-fail pool。',
+              compactFullDesc: '当前所有可调度 OpenAI 账号都支持 remote compact，能力面没有明显缺口。',
+              cohort: {
+                empty: '暂无 cohort',
+                none: '无强续链',
+                partial: '{count}/{total} 强续链',
+                full: '{count}/{total} 强续链'
+              },
+              cohortEmptyDesc: '当前没有可调度 OpenAI 账号，因此没有可用 cohort。',
+              cohortNoneDesc: '当前没有 strong continuation cohort，可用账号都只能走 degraded surface，续链和缓存亲和都会明显变差。',
+              cohortPartialDesc: '当前只有部分账号属于 strong cohort，仍有 {count} 个账号会落在 degraded surface。',
+              cohortFullDesc: '当前所有可调度 OpenAI 账号都在 strong cohort，可优先保住 continuation 与缓存亲和。'
+            },
+            group: {
+              compactCapableShort: 'compact',
+              strongShort: 'strong',
+              healthyDesc: '当前分组 OAuth={oauth}，API key={apikey}；compact 与强续链能力都可直接用于正常流量。',
+              mixedDesc: '当前分组只有部分账号支持 compact 或仍有 degraded 候选：compact {compact}/{total}，degraded {degraded}。不支持 compact 的账号：{names}。',
+              fastFailDesc: '当前分组 compact 能力为 0，但仍有 {strong} 个 strong cohort 账号；会话续链仍可能保住，但 compact 只能快速失败。OAuth={oauth}，API key={apikey}。当前不支持 compact 的账号：{names}。',
+              status: {
+                success: '可直接用',
+                info: '需挑选',
+                warning: '会 fast-fail'
+              }
+            }
+          },
           source: '快照来源',
           diagnosisRulesTitle: '诊断规则命中',
           nextActionsTitle: '建议下一步',

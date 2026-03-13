@@ -74,6 +74,12 @@ func (r stubOpenAIAccountRepo) ListSchedulableByPlatform(ctx context.Context, pl
 	return result, nil
 }
 
+func (r stubOpenAIAccountRepo) ListSchedulable(ctx context.Context) ([]Account, error) {
+	result := make([]Account, 0, len(r.accounts))
+	result = append(result, r.accounts...)
+	return result, nil
+}
+
 func (r stubOpenAIAccountRepo) ListSchedulableUngroupedByPlatform(ctx context.Context, platform string) ([]Account, error) {
 	return r.ListSchedulableByPlatform(ctx, platform)
 }

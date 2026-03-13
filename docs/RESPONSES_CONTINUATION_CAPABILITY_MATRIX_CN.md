@@ -116,7 +116,9 @@
 - 回归测试验证
 - 运行时快速诊断
 - 提供一个只读 admin/debug surface：`GET /api/v1/admin/ops/runtime/continuation`
-  当前返回体已经包含 `counters`、`config`、`state` 三层，其中 `state` 会暴露本地 `session state / TTL / conn churn` 相关快照
+  当前返回体已经包含 `counters`、`config`、`state`、`capability` 四层：
+  - `state` 暴露本地 `session state / TTL / conn churn` 相关快照
+  - `capability` 暴露可调度 OpenAI 账号的 `compact capability / strong cohort / degraded cohort` 按组汇总，可直接解释为什么某个 group 当前只能 fast-fail
 
 当前还**没有**承诺：
 
@@ -145,8 +147,8 @@
 
 ### Phase 2 下一步
 
-- 把当前观测接到更易读的 admin/runtime 页面或 dashboard，而不只是原始 JSON
-- 为 `state` 快照继续补充 TTL 命中率、连接回收与跨实例恢复相关指标
+- 继续补充更细的 `TTL hit / conn churn / cross-instance recovery` 指标，而不只是账号能力摘要
+- 为 capability 视图增加更强的当前 group / 当前 cohort 可用性提示，减少管理员人工对照账号池的成本
 
 ### Phase 3
 

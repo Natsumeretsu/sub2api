@@ -148,6 +148,15 @@ type ContinuationSummaryItem = {
   tone: 'neutral' | 'info' | 'success' | 'warning'
 }
 
+type ContinuationCapabilityGroupItem = {
+  key: string
+  groupName: string
+  compactValue: string
+  cohortValue: string
+  detail: string
+  tone: 'neutral' | 'info' | 'success' | 'warning'
+}
+
 type ContinuationDiagnosisRule = {
   key: string
   label: string
@@ -555,6 +564,112 @@ const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
   ]
 })
 
+const continuationCapabilitySummaryItems = computed<ContinuationSummaryItem[]>(() => {
+  const capability = continuationSnapshot.value?.capability
+  if (!capability) return []
+
+  const total = capability.global_total_openai_accounts
+  const compactCapable = capability.global_compact_capable_accounts
+  const compactIncapable = capability.global_compact_incapable_accounts
+  const strong = capability.global_strong_cohort_accounts
+  const degraded = capability.global_degraded_only_accounts
+
+  let compactValue = t('admin.ops.runtime.continuation.capability.summary.compact.none')
+  let compactDesc = t('admin.ops.runtime.continuation.capability.summary.compactNoneDesc')
+  let compactTone: ContinuationSummaryItem['tone'] = 'warning'
+  if (total === 0) {
+    compactValue = t('admin.ops.runtime.continuation.capability.summary.compact.empty')
+    compactDesc = t('admin.ops.runtime.continuation.capability.summary.compactEmptyDesc')
+    compactTone = 'warning'
+  } else if (compactCapable === total) {
+    compactValue = t('admin.ops.runtime.continuation.capability.summary.compact.full', { count: compactCapable, total })
+    compactDesc = t('admin.ops.runtime.continuation.capability.summary.compactFullDesc')
+    compactTone = 'success'
+  } else if (compactCapable > 0) {
+    compactValue = t('admin.ops.runtime.continuation.capability.summary.compact.partial', { count: compactCapable, total })
+    compactDesc = t('admin.ops.runtime.continuation.capability.summary.compactPartialDesc', { count: compactIncapable })
+    compactTone = 'info'
+  }
+
+  let cohortValue = t('admin.ops.runtime.continuation.capability.summary.cohort.none')
+  let cohortDesc = t('admin.ops.runtime.continuation.capability.summary.cohortNoneDesc')
+  let cohortTone: ContinuationSummaryItem['tone'] = 'warning'
+  if (total === 0) {
+    cohortValue = t('admin.ops.runtime.continuation.capability.summary.cohort.empty')
+    cohortDesc = t('admin.ops.runtime.continuation.capability.summary.cohortEmptyDesc')
+  } else if (strong === total) {
+    cohortValue = t('admin.ops.runtime.continuation.capability.summary.cohort.full', { count: strong, total })
+    cohortDesc = t('admin.ops.runtime.continuation.capability.summary.cohortFullDesc')
+    cohortTone = 'success'
+  } else if (strong > 0) {
+    cohortValue = t('admin.ops.runtime.continuation.capability.summary.cohort.partial', { count: strong, total })
+    cohortDesc = t('admin.ops.runtime.continuation.capability.summary.cohortPartialDesc', { count: degraded })
+    cohortTone = 'info'
+  }
+
+  return [
+    {
+      key: 'compact',
+      label: t('admin.ops.runtime.continuation.capability.labels.compact'),
+      value: compactValue,
+      description: compactDesc,
+      tone: compactTone
+    },
+    {
+      key: 'cohort',
+      label: t('admin.ops.runtime.continuation.capability.labels.cohort'),
+      value: cohortValue,
+      description: cohortDesc,
+      tone: cohortTone
+    }
+  ]
+})
+
+const continuationCapabilityGroupItems = computed<ContinuationCapabilityGroupItem[]>(() => {
+  const groups = continuationSnapshot.value?.capability?.groups || []
+  return groups.map((group) => {
+    const total = group.total_schedulable_openai_accounts
+    const compactCapable = group.compact_capable_accounts
+    const strong = group.strong_cohort_accounts
+    const degraded = group.degraded_only_accounts
+    const compactValue = `${compactCapable}/${total} ${t('admin.ops.runtime.continuation.capability.group.compactCapableShort')}`
+    const cohortValue = `${strong}/${total} ${t('admin.ops.runtime.continuation.capability.group.strongShort')}`
+
+    let tone: ContinuationCapabilityGroupItem['tone'] = 'success'
+    let detail = t('admin.ops.runtime.continuation.capability.group.healthyDesc', {
+      oauth: group.oauth_schedulable_accounts,
+      apikey: group.apikey_schedulable_accounts
+    })
+
+    if (compactCapable === 0 && total > 0) {
+      tone = 'warning'
+      detail = t('admin.ops.runtime.continuation.capability.group.fastFailDesc', {
+        oauth: group.oauth_schedulable_accounts,
+        apikey: group.apikey_schedulable_accounts,
+        strong,
+        names: (group.compact_incapable_account_names || []).join(', ') || t('common.none')
+      })
+    } else if (compactCapable < total || degraded > 0) {
+      tone = 'info'
+      detail = t('admin.ops.runtime.continuation.capability.group.mixedDesc', {
+        compact: compactCapable,
+        total,
+        degraded,
+        names: (group.compact_incapable_account_names || []).join(', ') || t('common.none')
+      })
+    }
+
+    return {
+      key: `group-${group.group_id}`,
+      groupName: group.group_name,
+      compactValue,
+      cohortValue,
+      detail,
+      tone
+    }
+  })
+})
+
 const continuationDiagnosisRules = computed<ContinuationDiagnosisRule[]>(() => {
   const snapshot = continuationSnapshot.value
   const derived = continuationDerivedStats.value
@@ -938,6 +1053,69 @@ onMounted(() => {
             </div>
             <div class="mt-3 text-xs leading-5 text-gray-600 dark:text-gray-300">
               {{ item.description }}
+            </div>
+          </div>
+        </div>
+
+        <div v-if="continuationCapabilitySummaryItems.length > 0" class="mb-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-600 dark:bg-dark-800">
+          <div class="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <div class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                {{ t('admin.ops.runtime.continuation.capability.title') }}
+              </div>
+              <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.ops.runtime.continuation.capability.description') }}
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div
+              v-for="item in continuationCapabilitySummaryItems"
+              :key="item.key"
+              class="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-dark-600 dark:bg-dark-900"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  {{ item.label }}
+                </div>
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold" :class="metricToneClass(item.tone)">
+                  {{ item.value }}
+                </span>
+              </div>
+              <div class="mt-3 text-xs leading-5 text-gray-600 dark:text-gray-300">
+                {{ item.description }}
+              </div>
+            </div>
+          </div>
+
+          <div v-if="continuationCapabilityGroupItems.length > 0" class="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
+            <div
+              v-for="item in continuationCapabilityGroupItems"
+              :key="item.key"
+              class="rounded-xl border border-gray-200 p-4 dark:border-dark-600"
+              :class="{
+                'bg-white dark:bg-dark-800': item.tone === 'neutral',
+                'bg-blue-50 dark:bg-blue-950/20': item.tone === 'info',
+                'bg-emerald-50 dark:bg-emerald-950/20': item.tone === 'success',
+                'bg-amber-50 dark:bg-amber-950/20': item.tone === 'warning'
+              }"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold text-gray-900 dark:text-white">{{ item.groupName }}</div>
+                  <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-500 dark:text-gray-400">
+                    <span class="rounded-full bg-white/70 px-2 py-0.5 dark:bg-dark-800/70">{{ item.compactValue }}</span>
+                    <span class="rounded-full bg-white/70 px-2 py-0.5 dark:bg-dark-800/70">{{ item.cohortValue }}</span>
+                  </div>
+                </div>
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold" :class="metricToneClass(item.tone)">
+                  {{ t(`admin.ops.runtime.continuation.capability.group.status.${item.tone}`) }}
+                </span>
+              </div>
+              <div class="mt-3 text-xs leading-5 text-gray-700 dark:text-gray-200">
+                {{ item.detail }}
+              </div>
             </div>
           </div>
         </div>

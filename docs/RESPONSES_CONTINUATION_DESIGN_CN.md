@@ -180,6 +180,7 @@ OpenAI 官方文档指向两个核心事实：
 - 调度器已显式区分 `continuation cohort / degraded cohort`，并把请求 cohort、选中 cohort 与 cohort fallback 作为决策字段输出，避免“只看 transport 看不见语义层级”
 - `prompt_cache_key` 已进入 scheduler 的 cache-affinity 输入；调度决策不再只看 availability 和 cohort，而会在同 cohort 候选里优先选择与当前 cache-affinity 更匹配的账号，把 continuation 亲和与缓存前缀亲和一起前置
 - 非流式 `/responses` / `/responses/compact` 在 API key passthrough 和 OAuth SSE-to-JSON 两条链上，都已经补了协议完整性校验：空 body、半截 SSE、或 `response.completed/response.done` 后缺 final response payload 时，不再透传 `200` 成功，而是先构造成 `502` 的可重试协议级 failover，让 handler 侧优先走同账号/跨账号受控重试
+- admin/runtime continuation 快照已扩展到 `capability` 层，会按 group 汇总 `compact-capable / strong cohort / degraded-only` 账号，直接解释“为什么某个账号池当前只能 fast-fail”，避免把 `Team号池` 和 `Private` 这类分组混成一条结论
 
 ### 4.2 暂不实施
 

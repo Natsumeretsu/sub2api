@@ -80,6 +80,8 @@ func TestOpenAIGatewayService_OpenAIWSContinuationRuntimeSnapshot(t *testing.T) 
 		Gateway: config.GatewayConfig{
 			OpenAIWS: config.GatewayOpenAIWSConfig{
 				Enabled:                                true,
+				OAuthEnabled:                           true,
+				APIKeyEnabled:                          true,
 				ResponsesWebsockets:                    true,
 				ResponsesWebsocketsV2:                  true,
 				IngressPreviousResponseRecoveryEnabled: true,
@@ -96,7 +98,47 @@ func TestOpenAIGatewayService_OpenAIWSContinuationRuntimeSnapshot(t *testing.T) 
 			},
 		},
 	}
-	svc := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	teamGroup := &Group{ID: 2, Name: "Team号池"}
+	privateGroup := &Group{ID: 3, Name: "Private"}
+	accountRepo := &stubOpenAIAccountRepo{
+		accounts: []Account{
+			{
+				ID:       12,
+				Name:     "aak9e9qvfc@zhurunqi.love",
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeOAuth,
+				Extra: map[string]any{
+					"openai_passthrough":                           true,
+					"openai_oauth_responses_websockets_v2_enabled": true,
+					"openai_oauth_responses_websockets_v2_mode":    OpenAIWSIngressModePassthrough,
+				},
+				GroupIDs: []int64{2},
+				Groups:   []*Group{teamGroup},
+			},
+			{
+				ID:       14,
+				Name:     "PackyCode",
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeAPIKey,
+				Extra: map[string]any{
+					"openai_passthrough":                            true,
+					"openai_apikey_responses_websockets_v2_enabled": true,
+					"openai_apikey_responses_websockets_v2_mode":    OpenAIWSIngressModePassthrough,
+				},
+				GroupIDs: []int64{3},
+				Groups:   []*Group{privateGroup},
+			},
+		},
+	}
+	openAIAccounts, err := accountRepo.ListSchedulableByPlatform(context.Background(), PlatformOpenAI)
+	require.NoError(t, err)
+	require.Len(t, openAIAccounts, 2)
+
+	svc := NewOpenAIGatewayService(accountRepo, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.NotNil(t, svc.accountRepo)
+	serviceOpenAIAccounts, err := svc.accountRepo.ListSchedulableByPlatform(context.Background(), PlatformOpenAI)
+	require.NoError(t, err)
+	require.Len(t, serviceOpenAIAccounts, 2)
 	store := svc.getOpenAIWSStateStore()
 	require.NotNil(t, store)
 	require.NoError(t, store.BindResponseAccount(context.Background(), 7, "resp_runtime_1", 101, time.Minute))
@@ -119,4 +161,36 @@ func TestOpenAIGatewayService_OpenAIWSContinuationRuntimeSnapshot(t *testing.T) 
 	require.Equal(t, 1, snapshot.State.SessionTurnStateEntries)
 	require.Equal(t, 1, snapshot.State.SessionLastResponseEntries)
 	require.Equal(t, int64(1), snapshot.State.ResponseAccountBindTotal)
+	require.Equal(t, int64(2), snapshot.Capability.GlobalTotalOpenAIAccounts)
+	require.Equal(t, int64(1), snapshot.Capability.GlobalCompactCapableAccounts)
+	require.Equal(t, int64(2), snapshot.Capability.GlobalStrongCohortAccounts)
+	require.Equal(t, int64(1), snapshot.Capability.GlobalCompactIncapableAccounts)
+	require.True(t, snapshot.Capability.HasAnyCompactCapableAccount)
+	require.True(t, snapshot.Capability.HasAnyStrongCohortAccount)
+	require.Len(t, snapshot.Capability.Groups, 2)
+
+	var privateSnapshot OpenAIWSContinuationGroupAvailability
+	var teamSnapshot OpenAIWSContinuationGroupAvailability
+	for _, group := range snapshot.Capability.Groups {
+		switch group.GroupID {
+		case 2:
+			teamSnapshot = group
+		case 3:
+			privateSnapshot = group
+		}
+	}
+
+	require.Equal(t, "Team号池", teamSnapshot.GroupName)
+	require.Equal(t, int64(1), teamSnapshot.TotalSchedulableOpenAIAccounts)
+	require.Equal(t, int64(1), teamSnapshot.OAuthSchedulableAccounts)
+	require.Equal(t, int64(1), teamSnapshot.CompactCapableAccounts)
+	require.Equal(t, int64(1), teamSnapshot.StrongCohortAccounts)
+	require.Equal(t, []string{"aak9e9qvfc@zhurunqi.love"}, teamSnapshot.CompactCapableAccountNames)
+
+	require.Equal(t, "Private", privateSnapshot.GroupName)
+	require.Equal(t, int64(1), privateSnapshot.TotalSchedulableOpenAIAccounts)
+	require.Equal(t, int64(1), privateSnapshot.APIKeySchedulableAccounts)
+	require.Equal(t, int64(1), privateSnapshot.CompactIncapableAccounts)
+	require.Equal(t, int64(1), privateSnapshot.StrongCohortAccounts)
+	require.Equal(t, []string{"PackyCode"}, privateSnapshot.CompactIncapableAccountNames)
 }
