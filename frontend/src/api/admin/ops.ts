@@ -14,6 +14,77 @@ export interface OpsRequestOptions {
   signal?: AbortSignal
 }
 
+export interface OpsRuntimeContinuationStatsSnapshot {
+  validation_reject_missing_call_id_total: number
+  validation_reject_missing_item_reference_total: number
+  prev_not_found_align_retry_total: number
+  prev_not_found_drop_retry_total: number
+  prev_not_found_drop_self_contained_retry_total: number
+  prev_not_found_fail_closed_missing_anchor_total: number
+  preflight_ping_align_retry_total: number
+  preflight_ping_drop_retry_total: number
+  preflight_ping_drop_self_contained_retry_total: number
+  preflight_ping_fail_closed_missing_anchor_total: number
+}
+
+export interface OpsRuntimeContinuationConfigSnapshot {
+  enabled: boolean
+  force_http: boolean
+  responses_websockets: boolean
+  responses_websockets_v2: boolean
+  allow_store_recovery: boolean
+  ingress_previous_response_recovery_enabled: boolean
+  store_disabled_conn_mode: string
+  store_disabled_force_new_conn: boolean
+  sticky_session_ttl_seconds: number
+  sticky_response_id_ttl_seconds: number
+  sticky_previous_response_ttl_seconds: number
+  max_conns_per_account: number
+  min_idle_per_account: number
+  max_idle_per_account: number
+  fallback_cooldown_seconds: number
+  retry_total_budget_ms: number
+}
+
+export interface OpsRuntimeContinuationStateSnapshot {
+  response_account_local_entries: number
+  response_conn_entries: number
+  session_turn_state_entries: number
+  session_last_response_entries: number
+  session_conn_entries: number
+
+  response_account_bind_total: number
+  response_account_delete_total: number
+  response_conn_bind_total: number
+  response_conn_delete_total: number
+  session_turn_state_bind_total: number
+  session_turn_state_delete_total: number
+  session_last_response_bind_total: number
+  session_last_response_delete_total: number
+  session_conn_bind_total: number
+  session_conn_delete_total: number
+
+  response_account_persistent: boolean
+  session_turn_state_persistent: boolean
+  session_last_response_persistent: boolean
+
+  local_cleanup_interval_seconds: number
+  local_cleanup_max_per_map: number
+  local_max_entries_per_map: number
+  redis_timeout_ms: number
+}
+
+export interface OpsRuntimeContinuationSnapshot {
+  counters: OpsRuntimeContinuationStatsSnapshot
+  config: OpsRuntimeContinuationConfigSnapshot
+  state: OpsRuntimeContinuationStateSnapshot
+}
+
+export interface OpsRuntimeContinuationResponse {
+  source: string
+  openai_ws: OpsRuntimeContinuationSnapshot
+}
+
 export interface OpsRetryRequest {
   mode: OpsRetryMode
   pinned_account_id?: number
@@ -1301,6 +1372,11 @@ export async function updateAlertRuntimeSettings(config: OpsAlertRuntimeSettings
   return data
 }
 
+export async function getRuntimeContinuationSnapshot(): Promise<OpsRuntimeContinuationResponse> {
+  const { data } = await apiClient.get<OpsRuntimeContinuationResponse>('/admin/ops/runtime/continuation')
+  return data
+}
+
 export async function getRuntimeLogConfig(): Promise<OpsRuntimeLogConfig> {
   const { data } = await apiClient.get<OpsRuntimeLogConfig>('/admin/ops/runtime/logging')
   return data
@@ -1399,6 +1475,7 @@ export const opsAPI = {
   updateEmailNotificationConfig,
   getAlertRuntimeSettings,
   updateAlertRuntimeSettings,
+  getRuntimeContinuationSnapshot,
   getRuntimeLogConfig,
   updateRuntimeLogConfig,
   resetRuntimeLogConfig,

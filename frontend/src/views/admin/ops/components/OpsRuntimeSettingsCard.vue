@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { opsAPI } from '@/api/admin/ops'
-import type { OpsAlertRuntimeSettings } from '../types'
+import type { OpsAlertRuntimeSettings, OpsRuntimeContinuationResponse } from '../types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 
 const { t } = useI18n()
@@ -13,6 +13,8 @@ const loading = ref(false)
 const saving = ref(false)
 
 const alertSettings = ref<OpsAlertRuntimeSettings | null>(null)
+const continuationRuntime = ref<OpsRuntimeContinuationResponse | null>(null)
+const continuationLoadFailed = ref(false)
 
 const showAlertEditor = ref(false)
 const draftAlert = ref<OpsAlertRuntimeSettings | null>(null)
@@ -128,10 +130,274 @@ const alertValidation = computed(() => {
   return validateRuntimeSettings(draftAlert.value)
 })
 
+const hasAnyRuntimeData = computed(() => !!alertSettings.value || !!continuationRuntime.value)
+const continuationSnapshot = computed(() => continuationRuntime.value?.openai_ws || null)
+
+type ContinuationDisplayItem = {
+  key: string
+  label: string
+  value: string | number
+  tone?: 'neutral' | 'info' | 'success' | 'warning'
+}
+
+function boolLabel(value: boolean | null | undefined): string {
+  return value ? t('common.enabled') : t('common.disabled')
+}
+
+function metricToneClass(tone: ContinuationDisplayItem['tone']): string {
+  switch (tone) {
+    case 'success':
+      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    case 'warning':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+    case 'info':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+    default:
+      return 'bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300'
+  }
+}
+
+function formatCount(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : '0'
+}
+
+const continuationModeBadges = computed<ContinuationDisplayItem[]>(() => {
+  const config = continuationSnapshot.value?.config
+  if (!config) return []
+  return [
+    {
+      key: 'enabled',
+      label: t('admin.ops.runtime.continuation.badges.gateway'),
+      value: boolLabel(config.enabled),
+      tone: config.enabled ? 'success' : 'warning'
+    },
+    {
+      key: 'wsv2',
+      label: t('admin.ops.runtime.continuation.badges.wsv2'),
+      value: boolLabel(config.responses_websockets_v2),
+      tone: config.responses_websockets_v2 ? 'success' : 'warning'
+    },
+    {
+      key: 'force_http',
+      label: t('admin.ops.runtime.continuation.badges.forceHttp'),
+      value: boolLabel(config.force_http),
+      tone: config.force_http ? 'warning' : 'info'
+    },
+    {
+      key: 'mode',
+      label: t('admin.ops.runtime.continuation.badges.connMode'),
+      value: config.store_disabled_conn_mode || t('common.unknown'),
+      tone: config.store_disabled_conn_mode === 'strict' ? 'info' : 'neutral'
+    }
+  ]
+})
+
+const continuationCounterItems = computed<ContinuationDisplayItem[]>(() => {
+  const counters = continuationSnapshot.value?.counters
+  if (!counters) return []
+  return [
+    {
+      key: 'validation_missing_call_id',
+      label: t('admin.ops.runtime.continuation.counters.validationMissingCallId'),
+      value: formatCount(counters.validation_reject_missing_call_id_total),
+      tone: counters.validation_reject_missing_call_id_total > 0 ? 'warning' : 'neutral'
+    },
+    {
+      key: 'validation_missing_item_reference',
+      label: t('admin.ops.runtime.continuation.counters.validationMissingItemReference'),
+      value: formatCount(counters.validation_reject_missing_item_reference_total),
+      tone: counters.validation_reject_missing_item_reference_total > 0 ? 'warning' : 'neutral'
+    },
+    {
+      key: 'prev_align_retry',
+      label: t('admin.ops.runtime.continuation.counters.prevAlignRetry'),
+      value: formatCount(counters.prev_not_found_align_retry_total),
+      tone: counters.prev_not_found_align_retry_total > 0 ? 'info' : 'neutral'
+    },
+    {
+      key: 'prev_drop_retry',
+      label: t('admin.ops.runtime.continuation.counters.prevDropRetry'),
+      value: formatCount(counters.prev_not_found_drop_retry_total),
+      tone: counters.prev_not_found_drop_retry_total > 0 ? 'info' : 'neutral'
+    },
+    {
+      key: 'prev_self_contained_retry',
+      label: t('admin.ops.runtime.continuation.counters.prevSelfContainedRetry'),
+      value: formatCount(counters.prev_not_found_drop_self_contained_retry_total),
+      tone: counters.prev_not_found_drop_self_contained_retry_total > 0 ? 'success' : 'neutral'
+    },
+    {
+      key: 'prev_missing_anchor_fail_close',
+      label: t('admin.ops.runtime.continuation.counters.prevMissingAnchorFailClose'),
+      value: formatCount(counters.prev_not_found_fail_closed_missing_anchor_total),
+      tone: counters.prev_not_found_fail_closed_missing_anchor_total > 0 ? 'warning' : 'neutral'
+    },
+    {
+      key: 'preflight_align_retry',
+      label: t('admin.ops.runtime.continuation.counters.preflightAlignRetry'),
+      value: formatCount(counters.preflight_ping_align_retry_total),
+      tone: counters.preflight_ping_align_retry_total > 0 ? 'info' : 'neutral'
+    },
+    {
+      key: 'preflight_drop_retry',
+      label: t('admin.ops.runtime.continuation.counters.preflightDropRetry'),
+      value: formatCount(counters.preflight_ping_drop_retry_total),
+      tone: counters.preflight_ping_drop_retry_total > 0 ? 'info' : 'neutral'
+    },
+    {
+      key: 'preflight_self_contained_retry',
+      label: t('admin.ops.runtime.continuation.counters.preflightSelfContainedRetry'),
+      value: formatCount(counters.preflight_ping_drop_self_contained_retry_total),
+      tone: counters.preflight_ping_drop_self_contained_retry_total > 0 ? 'success' : 'neutral'
+    },
+    {
+      key: 'preflight_missing_anchor_fail_close',
+      label: t('admin.ops.runtime.continuation.counters.preflightMissingAnchorFailClose'),
+      value: formatCount(counters.preflight_ping_fail_closed_missing_anchor_total),
+      tone: counters.preflight_ping_fail_closed_missing_anchor_total > 0 ? 'warning' : 'neutral'
+    }
+  ]
+})
+
+const continuationConfigItems = computed<ContinuationDisplayItem[]>(() => {
+  const config = continuationSnapshot.value?.config
+  if (!config) return []
+  return [
+    { key: 'responses_websockets', label: t('admin.ops.runtime.continuation.config.responsesWebsockets'), value: boolLabel(config.responses_websockets) },
+    { key: 'allow_store_recovery', label: t('admin.ops.runtime.continuation.config.allowStoreRecovery'), value: boolLabel(config.allow_store_recovery) },
+    {
+      key: 'ingress_previous_response_recovery_enabled',
+      label: t('admin.ops.runtime.continuation.config.ingressRecovery'),
+      value: boolLabel(config.ingress_previous_response_recovery_enabled)
+    },
+    {
+      key: 'store_disabled_force_new_conn',
+      label: t('admin.ops.runtime.continuation.config.forceNewConn'),
+      value: boolLabel(config.store_disabled_force_new_conn)
+    },
+    {
+      key: 'sticky_session_ttl_seconds',
+      label: t('admin.ops.runtime.continuation.config.stickySessionTTL'),
+      value: `${config.sticky_session_ttl_seconds}s`
+    },
+    {
+      key: 'sticky_response_id_ttl_seconds',
+      label: t('admin.ops.runtime.continuation.config.stickyResponseTTL'),
+      value: `${config.sticky_response_id_ttl_seconds}s`
+    },
+    {
+      key: 'sticky_previous_response_ttl_seconds',
+      label: t('admin.ops.runtime.continuation.config.stickyPreviousResponseTTL'),
+      value: `${config.sticky_previous_response_ttl_seconds}s`
+    },
+    {
+      key: 'retry_total_budget_ms',
+      label: t('admin.ops.runtime.continuation.config.retryBudget'),
+      value: `${config.retry_total_budget_ms}ms`
+    },
+    {
+      key: 'fallback_cooldown_seconds',
+      label: t('admin.ops.runtime.continuation.config.fallbackCooldown'),
+      value: `${config.fallback_cooldown_seconds}s`
+    },
+    {
+      key: 'conn_pool',
+      label: t('admin.ops.runtime.continuation.config.connPool'),
+      value: `${config.min_idle_per_account} / ${config.max_idle_per_account} / ${config.max_conns_per_account}`
+    }
+  ]
+})
+
+const continuationStateEntryItems = computed<ContinuationDisplayItem[]>(() => {
+  const state = continuationSnapshot.value?.state
+  if (!state) return []
+  return [
+    { key: 'response_account_local_entries', label: t('admin.ops.runtime.continuation.state.responseAccountEntries'), value: formatCount(state.response_account_local_entries) },
+    { key: 'response_conn_entries', label: t('admin.ops.runtime.continuation.state.responseConnEntries'), value: formatCount(state.response_conn_entries) },
+    { key: 'session_turn_state_entries', label: t('admin.ops.runtime.continuation.state.sessionTurnStateEntries'), value: formatCount(state.session_turn_state_entries) },
+    { key: 'session_last_response_entries', label: t('admin.ops.runtime.continuation.state.sessionLastResponseEntries'), value: formatCount(state.session_last_response_entries) },
+    { key: 'session_conn_entries', label: t('admin.ops.runtime.continuation.state.sessionConnEntries'), value: formatCount(state.session_conn_entries) }
+  ]
+})
+
+const continuationStatePersistenceItems = computed<ContinuationDisplayItem[]>(() => {
+  const state = continuationSnapshot.value?.state
+  if (!state) return []
+  return [
+    {
+      key: 'response_account_persistent',
+      label: t('admin.ops.runtime.continuation.state.responseAccountPersistent'),
+      value: boolLabel(state.response_account_persistent),
+      tone: state.response_account_persistent ? 'success' : 'warning'
+    },
+    {
+      key: 'session_turn_state_persistent',
+      label: t('admin.ops.runtime.continuation.state.sessionTurnStatePersistent'),
+      value: boolLabel(state.session_turn_state_persistent),
+      tone: state.session_turn_state_persistent ? 'success' : 'warning'
+    },
+    {
+      key: 'session_last_response_persistent',
+      label: t('admin.ops.runtime.continuation.state.sessionLastResponsePersistent'),
+      value: boolLabel(state.session_last_response_persistent),
+      tone: state.session_last_response_persistent ? 'success' : 'warning'
+    }
+  ]
+})
+
+const continuationStateChurnItems = computed<ContinuationDisplayItem[]>(() => {
+  const state = continuationSnapshot.value?.state
+  if (!state) return []
+  return [
+    { key: 'response_account_bind_total', label: t('admin.ops.runtime.continuation.state.responseAccountBindTotal'), value: formatCount(state.response_account_bind_total) },
+    { key: 'response_account_delete_total', label: t('admin.ops.runtime.continuation.state.responseAccountDeleteTotal'), value: formatCount(state.response_account_delete_total) },
+    { key: 'response_conn_bind_total', label: t('admin.ops.runtime.continuation.state.responseConnBindTotal'), value: formatCount(state.response_conn_bind_total) },
+    { key: 'response_conn_delete_total', label: t('admin.ops.runtime.continuation.state.responseConnDeleteTotal'), value: formatCount(state.response_conn_delete_total) },
+    { key: 'session_turn_state_bind_total', label: t('admin.ops.runtime.continuation.state.sessionTurnStateBindTotal'), value: formatCount(state.session_turn_state_bind_total) },
+    { key: 'session_turn_state_delete_total', label: t('admin.ops.runtime.continuation.state.sessionTurnStateDeleteTotal'), value: formatCount(state.session_turn_state_delete_total) },
+    { key: 'session_last_response_bind_total', label: t('admin.ops.runtime.continuation.state.sessionLastResponseBindTotal'), value: formatCount(state.session_last_response_bind_total) },
+    { key: 'session_last_response_delete_total', label: t('admin.ops.runtime.continuation.state.sessionLastResponseDeleteTotal'), value: formatCount(state.session_last_response_delete_total) },
+    { key: 'session_conn_bind_total', label: t('admin.ops.runtime.continuation.state.sessionConnBindTotal'), value: formatCount(state.session_conn_bind_total) },
+    { key: 'session_conn_delete_total', label: t('admin.ops.runtime.continuation.state.sessionConnDeleteTotal'), value: formatCount(state.session_conn_delete_total) }
+  ]
+})
+
+const continuationStateLimitItems = computed<ContinuationDisplayItem[]>(() => {
+  const state = continuationSnapshot.value?.state
+  if (!state) return []
+  return [
+    { key: 'local_cleanup_interval_seconds', label: t('admin.ops.runtime.continuation.state.localCleanupInterval'), value: `${state.local_cleanup_interval_seconds}s` },
+    { key: 'local_cleanup_max_per_map', label: t('admin.ops.runtime.continuation.state.localCleanupMaxPerMap'), value: formatCount(state.local_cleanup_max_per_map) },
+    { key: 'local_max_entries_per_map', label: t('admin.ops.runtime.continuation.state.localMaxEntriesPerMap'), value: formatCount(state.local_max_entries_per_map) },
+    { key: 'redis_timeout_ms', label: t('admin.ops.runtime.continuation.state.redisTimeoutMs'), value: `${state.redis_timeout_ms}ms` }
+  ]
+})
+
 async function loadSettings() {
   loading.value = true
+  continuationLoadFailed.value = false
   try {
-    alertSettings.value = await opsAPI.getAlertRuntimeSettings()
+    const [alertResult, continuationResult] = await Promise.allSettled([
+      opsAPI.getAlertRuntimeSettings(),
+      opsAPI.getRuntimeContinuationSnapshot()
+    ])
+
+    if (alertResult.status === 'fulfilled') {
+      alertSettings.value = alertResult.value
+    } else {
+      alertSettings.value = null
+      throw alertResult.reason
+    }
+
+    if (continuationResult.status === 'fulfilled') {
+      continuationRuntime.value = continuationResult.value
+    } else {
+      continuationLoadFailed.value = true
+      console.error('[OpsRuntimeSettingsCard] Failed to load continuation runtime snapshot', continuationResult.reason)
+      appStore.showWarning(
+        (continuationResult.reason as any)?.response?.data?.detail || t('admin.ops.runtime.continuation.loadFailed')
+      )
+    }
   } catch (err: any) {
     console.error('[OpsRuntimeSettingsCard] Failed to load runtime settings', err)
     appStore.showError(err?.response?.data?.detail || t('admin.ops.runtime.loadFailed'))
@@ -255,13 +521,13 @@ onMounted(() => {
       </button>
     </div>
 
-    <div v-if="!alertSettings" class="text-sm text-gray-500 dark:text-gray-400">
+    <div v-if="!hasAnyRuntimeData" class="text-sm text-gray-500 dark:text-gray-400">
       <span v-if="loading">{{ t('admin.ops.runtime.loading') }}</span>
       <span v-else>{{ t('admin.ops.runtime.noData') }}</span>
     </div>
 
     <div v-else class="space-y-6">
-      <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-700/50">
+      <div v-if="alertSettings" class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-700/50">
         <div class="mb-3 flex items-center justify-between">
           <h4 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('admin.ops.runtime.alertTitle') }}</h4>
           <button class="btn btn-sm btn-secondary" @click="openAlertEditor">{{ t('common.edit') }}</button>
@@ -299,6 +565,155 @@ onMounted(() => {
             </div>
           </details>
         </div>
+      </div>
+
+      <div v-if="continuationRuntime && continuationSnapshot" class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-700/50">
+        <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h4 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('admin.ops.runtime.continuation.title') }}</h4>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.ops.runtime.continuation.description') }}
+            </p>
+            <div class="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+              {{ t('admin.ops.runtime.continuation.source') }}:
+              <span class="ml-1 font-mono text-gray-700 dark:text-gray-200">{{ continuationRuntime.source }}</span>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-2">
+            <span
+              v-for="item in continuationModeBadges"
+              :key="item.key"
+              class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium"
+              :class="metricToneClass(item.tone)"
+            >
+              <span class="text-[11px] uppercase tracking-wide opacity-80">{{ item.label }}</span>
+              <span>{{ item.value }}</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+          <div
+            v-for="item in continuationCounterItems"
+            :key="item.key"
+            class="rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-800"
+          >
+            <div class="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              {{ item.label }}
+            </div>
+            <div class="mt-2 flex items-end justify-between gap-3">
+              <div class="text-xl font-bold text-gray-900 dark:text-white">{{ item.value }}</div>
+              <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold" :class="metricToneClass(item.tone)">
+                {{ t('admin.ops.runtime.continuation.countersTag') }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="continuationLoadFailed"
+          class="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200"
+        >
+          {{ t('admin.ops.runtime.continuation.partialDataHint') }}
+        </div>
+
+        <details class="mt-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-600 dark:bg-dark-800">
+          <summary class="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-200">
+            {{ t('admin.ops.runtime.continuation.advancedSummary') }}
+          </summary>
+
+          <div class="mt-4 space-y-5">
+            <div>
+              <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                {{ t('admin.ops.runtime.continuation.sections.config') }}
+              </div>
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                <div
+                  v-for="item in continuationConfigItems"
+                  :key="item.key"
+                  class="rounded-lg bg-gray-50 p-3 text-xs dark:bg-dark-900"
+                >
+                  <div class="text-gray-500 dark:text-gray-400">{{ item.label }}</div>
+                  <div class="mt-1 font-mono text-gray-900 dark:text-white">{{ item.value }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                {{ t('admin.ops.runtime.continuation.sections.stateEntries') }}
+              </div>
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                <div
+                  v-for="item in continuationStateEntryItems"
+                  :key="item.key"
+                  class="rounded-lg bg-gray-50 p-3 text-xs dark:bg-dark-900"
+                >
+                  <div class="text-gray-500 dark:text-gray-400">{{ item.label }}</div>
+                  <div class="mt-1 font-mono text-gray-900 dark:text-white">{{ item.value }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                {{ t('admin.ops.runtime.continuation.sections.persistence') }}
+              </div>
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <div
+                  v-for="item in continuationStatePersistenceItems"
+                  :key="item.key"
+                  class="rounded-lg bg-gray-50 p-3 text-xs dark:bg-dark-900"
+                >
+                  <div class="text-gray-500 dark:text-gray-400">{{ item.label }}</div>
+                  <div class="mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold" :class="metricToneClass(item.tone)">
+                    {{ item.value }}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                {{ t('admin.ops.runtime.continuation.sections.churn') }}
+              </div>
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                <div
+                  v-for="item in continuationStateChurnItems"
+                  :key="item.key"
+                  class="rounded-lg bg-gray-50 p-3 text-xs dark:bg-dark-900"
+                >
+                  <div class="text-gray-500 dark:text-gray-400">{{ item.label }}</div>
+                  <div class="mt-1 font-mono text-gray-900 dark:text-white">{{ item.value }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                {{ t('admin.ops.runtime.continuation.sections.limits') }}
+              </div>
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div
+                  v-for="item in continuationStateLimitItems"
+                  :key="item.key"
+                  class="rounded-lg bg-gray-50 p-3 text-xs dark:bg-dark-900"
+                >
+                  <div class="text-gray-500 dark:text-gray-400">{{ item.label }}</div>
+                  <div class="mt-1 font-mono text-gray-900 dark:text-white">{{ item.value }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div
+        v-else-if="continuationLoadFailed"
+        class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200"
+      >
+        {{ t('admin.ops.runtime.continuation.loadFailedInline') }}
       </div>
     </div>
   </div>
