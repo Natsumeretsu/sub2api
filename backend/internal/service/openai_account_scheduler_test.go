@@ -182,6 +182,55 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionSticky(t *testin
 	}
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyRecoveredFromLastResponse(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(10)
+	account := Account{
+		ID:          2002,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+	}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{}}
+	cfg := newOpenAIWSV2TestConfig()
+	cfg.Gateway.OpenAIWS.StickySessionTTLSeconds = 1800
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{account}},
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	resetOpenAIWSContinuationStatsForTest()
+	store := svc.getOpenAIWSStateStore()
+	store.BindSessionLastResponse(groupID, "session_hash_recover", "resp_prev_recover", time.Hour)
+	require.NoError(t, store.BindResponseAccount(ctx, groupID, "resp_prev_recover", account.ID, time.Hour))
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"session_hash_recover",
+		"gpt-5.1",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, account.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+	require.True(t, decision.StickySessionHit)
+	require.Equal(t, account.ID, cache.sessionBindings["openai:session_hash_recover"])
+	require.Equal(t, int64(1), OpenAIWSContinuationStats().SessionStickyRebindFromLastResponseTotal)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyKeepsSticky(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10100)

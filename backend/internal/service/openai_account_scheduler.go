@@ -815,14 +815,9 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 		return selection, decision, err
 	}
 
-	var stickyAccountID int64
-	if sessionHash != "" && s.cache != nil {
-		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil && accountID > 0 {
-			stickyAccountID = accountID
-		}
-	}
+	stickyAccountID, stickyRecovered, _ := s.resolveOpenAIWSStickyAccountIDForSession(ctx, groupID, sessionHash)
 
-	return scheduler.Select(ctx, OpenAIAccountScheduleRequest{
+	selection, decision, err := scheduler.Select(ctx, OpenAIAccountScheduleRequest{
 		GroupID:            groupID,
 		SessionHash:        sessionHash,
 		StickyAccountID:    stickyAccountID,
@@ -831,6 +826,46 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 		RequiredTransport:  requiredTransport,
 		ExcludedIDs:        excludedIDs,
 	})
+	s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)
+	return selection, decision, err
+}
+
+func (s *OpenAIGatewayService) resolveOpenAIWSStickyAccountIDForSession(ctx context.Context, groupID *int64, sessionHash string) (int64, bool, string) {
+	sessionHash = strings.TrimSpace(sessionHash)
+	if sessionHash == "" {
+		return 0, false, ""
+	}
+	if s != nil && s.cache != nil {
+		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil && accountID > 0 {
+			return accountID, false, ""
+		}
+	}
+	stateStore := s.getOpenAIWSStateStore()
+	if stateStore == nil {
+		return 0, false, ""
+	}
+	lastResponseID, ok := stateStore.GetSessionLastResponse(derefGroupID(groupID), sessionHash)
+	lastResponseID = strings.TrimSpace(lastResponseID)
+	if !ok || lastResponseID == "" {
+		return 0, false, ""
+	}
+	accountID, err := stateStore.GetResponseAccount(ctx, derefGroupID(groupID), lastResponseID)
+	if err != nil || accountID <= 0 {
+		return 0, false, lastResponseID
+	}
+	return accountID, true, lastResponseID
+}
+
+func (s *OpenAIGatewayService) rebindRecoveredOpenAIWSStickyAccount(ctx context.Context, groupID *int64, sessionHash string, stickyAccountID int64, stickyRecovered bool, selection *AccountSelectionResult) {
+	if !stickyRecovered || strings.TrimSpace(sessionHash) == "" || stickyAccountID <= 0 || selection == nil || selection.Account == nil {
+		return
+	}
+	if selection.Account.ID != stickyAccountID {
+		return
+	}
+	if err := s.setStickySessionAccountID(ctx, groupID, sessionHash, stickyAccountID, s.openAIWSSessionStickyTTL()); err == nil {
+		recordOpenAIWSContinuationSessionStickyRebindFromLastResponse()
+	}
 }
 
 func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(accountID int64, success bool, firstTokenMs *int) {

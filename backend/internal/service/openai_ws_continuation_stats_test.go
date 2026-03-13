@@ -13,6 +13,7 @@ func TestOpenAIWSContinuationStatsSnapshot(t *testing.T) {
 	resetOpenAIWSContinuationStatsForTest()
 	RecordOpenAIWSContinuationValidationReject("function_call_output_missing_call_id")
 	RecordOpenAIWSContinuationValidationReject("function_call_output_missing_item_reference")
+	recordOpenAIWSContinuationSessionStickyRebindFromLastResponse()
 	recordOpenAIWSContinuationPrevNotFoundAlignRetry()
 	recordOpenAIWSContinuationPrevNotFoundDropRetry(true)
 	recordOpenAIWSContinuationPrevNotFoundFailClosed("missing_local_anchor")
@@ -25,6 +26,7 @@ func TestOpenAIWSContinuationStatsSnapshot(t *testing.T) {
 	stats := OpenAIWSContinuationStats()
 	require.Equal(t, int64(1), stats.ValidationRejectMissingCallIDTotal)
 	require.Equal(t, int64(1), stats.ValidationRejectMissingItemReferenceTotal)
+	require.Equal(t, int64(1), stats.SessionStickyRebindFromLastResponseTotal)
 	require.Equal(t, int64(1), stats.PrevNotFoundAlignRetryTotal)
 	require.Equal(t, int64(1), stats.PrevNotFoundDropRetryTotal)
 	require.Equal(t, int64(1), stats.PrevNotFoundDropSelfContainedRetryTotal)
@@ -49,6 +51,7 @@ func TestOpenAIWSContinuationStatsResetForTest(t *testing.T) {
 
 func TestOpenAIGatewayService_OpenAIWSContinuationRuntimeSnapshot(t *testing.T) {
 	resetOpenAIWSContinuationStatsForTest()
+	recordOpenAIWSContinuationSessionStickyRebindFromLastResponse()
 	recordOpenAIWSContinuationPrevNotFoundAlignRetry()
 
 	cfg := &config.Config{
@@ -79,6 +82,7 @@ func TestOpenAIGatewayService_OpenAIWSContinuationRuntimeSnapshot(t *testing.T) 
 	store.BindSessionLastResponse(7, "session_hash_runtime", "resp_runtime_1", time.Minute)
 
 	snapshot := svc.OpenAIWSContinuationRuntimeSnapshot()
+	require.Equal(t, int64(1), snapshot.Counters.SessionStickyRebindFromLastResponseTotal)
 	require.Equal(t, int64(1), snapshot.Counters.PrevNotFoundAlignRetryTotal)
 	require.True(t, snapshot.Config.Enabled)
 	require.True(t, snapshot.Config.ResponsesWebsocketsV2)

@@ -489,6 +489,56 @@ func TestOpenAISelectAccountWithLoadAwareness_StickyUnschedulableClearsSession(t
 	}
 }
 
+func TestOpenAISelectAccountWithLoadAwareness_StickyRecoveredFromLastResponse(t *testing.T) {
+	resetOpenAIWSContinuationStatsForTest()
+
+	sessionHash := "session-restore"
+	groupID := int64(1)
+	repo := stubOpenAIAccountRepo{
+		accounts: []Account{
+			{ID: 7, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true, Concurrency: 1},
+		},
+	}
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{}}
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.StickySessionTTLSeconds = 1800
+	cfg.Gateway.OpenAIWS.StickyResponseIDTTLSeconds = 3600
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	store := svc.getOpenAIWSStateStore()
+	store.BindSessionLastResponse(groupID, sessionHash, "resp_restore_1", time.Hour)
+	if err := store.BindResponseAccount(context.Background(), groupID, "resp_restore_1", 7, time.Hour); err != nil {
+		t.Fatalf("BindResponseAccount error: %v", err)
+	}
+
+	selection, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, sessionHash, "gpt-4", nil)
+	if err != nil {
+		t.Fatalf("SelectAccountWithLoadAwareness error: %v", err)
+	}
+	if selection == nil || selection.Account == nil || selection.Account.ID != 7 {
+		t.Fatalf("expected account 7, got %+v", selection)
+	}
+	if cache.sessionBindings["openai:"+sessionHash] != 7 {
+		t.Fatalf("expected sticky session to be rebound from shared response state")
+	}
+	if OpenAIWSContinuationStats().SessionStickyRebindFromLastResponseTotal != 1 {
+		t.Fatalf("expected session sticky rebind counter to increment")
+	}
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func TestOpenAISelectAccountForModelWithExclusions_NoModelSupport(t *testing.T) {
 	repo := stubOpenAIAccountRepo{
 		accounts: []Account{

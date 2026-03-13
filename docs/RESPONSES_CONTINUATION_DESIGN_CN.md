@@ -169,6 +169,7 @@ OpenAI 官方文档指向两个核心事实：
 - 无本地锚点时，如果 payload 自包含，则允许单次 drop-`previous_response_id` 重试
 - 无本地锚点且 payload 不自包含，则明确 fail-close
 - `session_hash -> last_response_id / turn_state` 从共享缓存回填本地时，使用共享剩余 TTL，而不是额外延长本地寿命
+- 当 `session_hash -> account_id` 粘连缺失，但 `session_hash -> last_response_id` 与 `response_id -> account_id` 仍可用时，优先从共享响应状态恢复 sticky account，并回填会话级粘连
 
 ### 4.2 暂不实施
 

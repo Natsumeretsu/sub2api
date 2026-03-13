@@ -1251,12 +1251,7 @@ func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool
 // SelectAccountWithLoadAwareness selects an account with load-awareness and wait plan.
 func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*AccountSelectionResult, error) {
 	cfg := s.schedulingConfig()
-	var stickyAccountID int64
-	if sessionHash != "" && s.cache != nil {
-		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil {
-			stickyAccountID = accountID
-		}
-	}
+	stickyAccountID, stickyRecovered, _ := s.resolveOpenAIWSStickyAccountIDForSession(ctx, groupID, sessionHash)
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
 		account, err := s.selectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, excludedIDs, stickyAccountID)
 		if err != nil {
@@ -1264,16 +1259,18 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 		}
 		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
 		if err == nil && result.Acquired {
-			return &AccountSelectionResult{
+			selection := &AccountSelectionResult{
 				Account:     account,
 				Acquired:    true,
 				ReleaseFunc: result.ReleaseFunc,
-			}, nil
+			}
+			s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)
+			return selection, nil
 		}
 		if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
 			waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
 			if waitingCount < cfg.StickySessionMaxWaiting {
-				return &AccountSelectionResult{
+				selection := &AccountSelectionResult{
 					Account: account,
 					WaitPlan: &AccountWaitPlan{
 						AccountID:      account.ID,
@@ -1281,7 +1278,9 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 						Timeout:        cfg.StickySessionWaitTimeout,
 						MaxWaiting:     cfg.StickySessionMaxWaiting,
 					},
-				}, nil
+				}
+				s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)
+				return selection, nil
 			}
 		}
 		return &AccountSelectionResult{
@@ -1326,16 +1325,18 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 					if err == nil && result.Acquired {
 						_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
-						return &AccountSelectionResult{
+						selection := &AccountSelectionResult{
 							Account:     account,
 							Acquired:    true,
 							ReleaseFunc: result.ReleaseFunc,
-						}, nil
+						}
+						s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)
+						return selection, nil
 					}
 
 					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
 					if waitingCount < cfg.StickySessionMaxWaiting {
-						return &AccountSelectionResult{
+						selection := &AccountSelectionResult{
 							Account: account,
 							WaitPlan: &AccountWaitPlan{
 								AccountID:      accountID,
@@ -1343,7 +1344,9 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 								Timeout:        cfg.StickySessionWaitTimeout,
 								MaxWaiting:     cfg.StickySessionMaxWaiting,
 							},
-						}, nil
+						}
+						s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)
+						return selection, nil
 					}
 				}
 			}
@@ -1395,11 +1398,13 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 				if sessionHash != "" {
 					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 				}
-				return &AccountSelectionResult{
+				selection := &AccountSelectionResult{
 					Account:     fresh,
 					Acquired:    true,
 					ReleaseFunc: result.ReleaseFunc,
-				}, nil
+				}
+				s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)
+				return selection, nil
 			}
 		}
 	} else {
@@ -1449,11 +1454,13 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 					if sessionHash != "" {
 						_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
 					}
-					return &AccountSelectionResult{
+					selection := &AccountSelectionResult{
 						Account:     fresh,
 						Acquired:    true,
 						ReleaseFunc: result.ReleaseFunc,
-					}, nil
+					}
+					s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)
+					return selection, nil
 				}
 			}
 		}

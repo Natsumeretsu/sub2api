@@ -10,6 +10,7 @@ import (
 type OpenAIWSContinuationStatsSnapshot struct {
 	ValidationRejectMissingCallIDTotal        int64
 	ValidationRejectMissingItemReferenceTotal int64
+	SessionStickyRebindFromLastResponseTotal  int64
 	PrevNotFoundAlignRetryTotal               int64
 	PrevNotFoundDropRetryTotal                int64
 	PrevNotFoundDropSelfContainedRetryTotal   int64
@@ -25,6 +26,7 @@ type OpenAIWSContinuationStatsSnapshot struct {
 var (
 	openAIWSContinuationValidationRejectMissingCallIDTotal        atomic.Int64
 	openAIWSContinuationValidationRejectMissingItemReferenceTotal atomic.Int64
+	openAIWSContinuationSessionStickyRebindFromLastResponseTotal  atomic.Int64
 	openAIWSContinuationPrevNotFoundAlignRetryTotal               atomic.Int64
 	openAIWSContinuationPrevNotFoundDropRetryTotal                atomic.Int64
 	openAIWSContinuationPrevNotFoundDropSelfContainedRetryTotal   atomic.Int64
@@ -41,6 +43,7 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 	return OpenAIWSContinuationStatsSnapshot{
 		ValidationRejectMissingCallIDTotal:        openAIWSContinuationValidationRejectMissingCallIDTotal.Load(),
 		ValidationRejectMissingItemReferenceTotal: openAIWSContinuationValidationRejectMissingItemReferenceTotal.Load(),
+		SessionStickyRebindFromLastResponseTotal:  openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Load(),
 		PrevNotFoundAlignRetryTotal:               openAIWSContinuationPrevNotFoundAlignRetryTotal.Load(),
 		PrevNotFoundDropRetryTotal:                openAIWSContinuationPrevNotFoundDropRetryTotal.Load(),
 		PrevNotFoundDropSelfContainedRetryTotal:   openAIWSContinuationPrevNotFoundDropSelfContainedRetryTotal.Load(),
@@ -69,6 +72,10 @@ func RecordOpenAIWSContinuationValidationReject(reason string) {
 	case "function_call_output_missing_item_reference":
 		recordOpenAIWSContinuationValidationRejectMissingItemReference()
 	}
+}
+
+func recordOpenAIWSContinuationSessionStickyRebindFromLastResponse() {
+	openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Add(1)
 }
 
 func recordOpenAIWSContinuationPrevNotFoundAlignRetry() {
@@ -114,6 +121,7 @@ func recordOpenAIWSContinuationPreflightPingFailClosed(reason string) {
 func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationValidationRejectMissingCallIDTotal.Store(0)
 	openAIWSContinuationValidationRejectMissingItemReferenceTotal.Store(0)
+	openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Store(0)
 	openAIWSContinuationPrevNotFoundAlignRetryTotal.Store(0)
 	openAIWSContinuationPrevNotFoundDropRetryTotal.Store(0)
 	openAIWSContinuationPrevNotFoundDropSelfContainedRetryTotal.Store(0)

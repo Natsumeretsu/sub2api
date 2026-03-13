@@ -67,7 +67,8 @@
 5. 无锚点且不自包含时的明确 fail-close
 6. 会话级 `last_response_id` / `turn_state` 状态面
 7. 共享缓存回填本地时尊重共享剩余 TTL，不额外放大本地寿命
-8. 不做 transcript replay
+8. 当 `session_hash -> account_id` 缺失但共享 `last_response_id -> account_id` 仍在时，可恢复 sticky account 并回填会话粘连
+9. 不做 transcript replay
 
 ### 3.2 当前明确不承诺的点
 
@@ -89,6 +90,8 @@
   - `drop_previous_response_id_self_contained`
   - `missing_local_anchor fail-close`
   - `stale_local_anchor fail-close`
+- `session_hash -> last_response_id -> account_id`：
+  - `sticky session rebind from shared response state`
 - preflight ping fail：
   - `align_previous_response_id`
   - `drop_previous_response_id`
