@@ -1852,7 +1852,7 @@ func TestHandleOAuthSSEToJSON_CompletedEventReturnsJSON(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "data:")
 }
 
-func TestHandleOAuthSSEToJSON_NoFinalResponseKeepsSSEBody(t *testing.T) {
+func TestHandleOAuthSSEToJSON_NoFinalResponseReturnsRetryableProtocolFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1869,11 +1869,13 @@ func TestHandleOAuthSSEToJSON_NoFinalResponseKeepsSSEBody(t *testing.T) {
 	}, "\n"))
 
 	usage, err := svc.handleOAuthSSEToJSON(resp, c, body, "gpt-4o", "gpt-4o")
-	require.NoError(t, err)
-	require.NotNil(t, usage)
-	require.Equal(t, 0, usage.InputTokens)
-	require.Contains(t, rec.Header().Get("Content-Type"), "text/event-stream")
-	require.Contains(t, rec.Body.String(), `data: {"type":"response.in_progress"`)
+	require.Nil(t, usage)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "without final response payload")
+	require.Equal(t, "", rec.Body.String())
 }
 
 func TestHandleOAuthSSEToJSON_ResponseFailedReturnsProtocolError(t *testing.T) {
@@ -1898,4 +1900,73 @@ func TestHandleOAuthSSEToJSON_ResponseFailedReturnsProtocolError(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Contains(t, rec.Body.String(), "upstream rejected request")
 	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+}
+
+func TestHandleOAuthSSEToJSON_EmptyCompactBodyReturnsRetryableProtocolFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses/compact", nil)
+
+	svc := &OpenAIGatewayService{cfg: &config.Config{}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+	}
+
+	usage, err := svc.handleOAuthSSEToJSON(resp, c, nil, "gpt-5.4", "gpt-5.4")
+	require.Nil(t, usage)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "compact stream disconnected before completion")
+}
+
+func TestHandleNonStreamingResponsePassthrough_CompactEmptyBodyReturnsRetryableProtocolFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses/compact", nil)
+
+	svc := &OpenAIGatewayService{cfg: &config.Config{}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+
+	usage, err := svc.handleNonStreamingResponsePassthrough(context.Background(), resp, c)
+	require.Nil(t, usage)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "compact stream disconnected before completion")
+}
+
+func TestHandleNonStreamingResponsePassthrough_CompactSSECompletedConvertsToJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses/compact", nil)
+
+	svc := &OpenAIGatewayService{cfg: &config.Config{}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.in_progress","response":{"id":"resp_4"}}`,
+			`data: {"type":"response.completed","response":{"id":"resp_4","model":"gpt-5.4","usage":{"input_tokens":3,"output_tokens":4,"input_tokens_details":{"cached_tokens":1}}}}`,
+			`data: [DONE]`,
+		}, "\n"))),
+	}
+
+	usage, err := svc.handleNonStreamingResponsePassthrough(context.Background(), resp, c)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	require.Equal(t, 3, usage.InputTokens)
+	require.Equal(t, 4, usage.OutputTokens)
+	require.Contains(t, rec.Body.String(), `"id":"resp_4"`)
+	require.NotContains(t, rec.Body.String(), "data:")
 }

@@ -1575,6 +1575,13 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		}
 	}
 
+	if len(responseBody) > 0 {
+		if msg := strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)); msg != "" {
+			h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", msg, streamStarted)
+			return
+		}
+	}
+
 	// 使用默认的错误映射
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)

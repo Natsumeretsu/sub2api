@@ -2813,6 +2813,16 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 		return nil, err
 	}
 
+	if shouldValidateOpenAINonStreamingProtocol(c) {
+		bodyLooksLikeSSE := bytes.Contains(body, []byte("data:")) || bytes.Contains(body, []byte("event:"))
+		if isEventStreamResponse(resp.Header) || bodyLooksLikeSSE {
+			return s.handleOAuthSSEToJSON(resp, c, body, "", "")
+		}
+		if msg, invalid := openAINonStreamingJSONProtocolMessage(c, body); invalid {
+			return nil, buildOpenAINonStreamingProtocolFailover(resp, msg)
+		}
+	}
+
 	usage := &OpenAIUsage{}
 	usageParsed := false
 	if len(body) > 0 {
@@ -3711,6 +3721,9 @@ func (s *OpenAIGatewayService) handleOAuthSSEToJSON(resp *http.Response, c *gin.
 			}
 			return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 		}
+		if msg, invalid := openAINonStreamingSSEProtocolMessage(c, bodyText, terminalType, terminalOK); invalid {
+			return nil, buildOpenAINonStreamingProtocolFailover(resp, msg)
+		}
 		usage = s.parseSSEUsageFromBody(bodyText)
 		if originalModel != mappedModel {
 			bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
@@ -3730,6 +3743,78 @@ func (s *OpenAIGatewayService) handleOAuthSSEToJSON(resp *http.Response, c *gin.
 	c.Data(resp.StatusCode, contentType, body)
 
 	return usage, nil
+}
+
+func shouldValidateOpenAINonStreamingProtocol(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	normalizedPath := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
+	return strings.HasSuffix(normalizedPath, "/responses") || strings.HasSuffix(normalizedPath, "/responses/compact")
+}
+
+func openAINonStreamingJSONProtocolMessage(c *gin.Context, body []byte) (string, bool) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		if isOpenAIRemoteCompactRequest(c) {
+			return "Upstream compact stream disconnected before completion", true
+		}
+		return "Upstream returned an empty non-streaming response", true
+	}
+	if !gjson.ValidBytes(trimmed) {
+		if isOpenAIRemoteCompactRequest(c) {
+			return "Upstream compact returned invalid non-streaming JSON", true
+		}
+		return "Upstream returned invalid non-streaming JSON", true
+	}
+	return "", false
+}
+
+func openAINonStreamingSSEProtocolMessage(c *gin.Context, bodyText, terminalType string, terminalOK bool) (string, bool) {
+	trimmed := strings.TrimSpace(bodyText)
+	if trimmed == "" {
+		if isOpenAIRemoteCompactRequest(c) {
+			return "Upstream compact stream disconnected before completion", true
+		}
+		return "Upstream non-streaming SSE response was empty", true
+	}
+	if terminalOK {
+		switch terminalType {
+		case "response.completed", "response.done":
+			if isOpenAIRemoteCompactRequest(c) {
+				return "Upstream compact stream completed without final response payload", true
+			}
+			return "Upstream non-streaming SSE completed without final response payload", true
+		}
+	}
+	if strings.Contains(trimmed, "[DONE]") {
+		if isOpenAIRemoteCompactRequest(c) {
+			return "Upstream compact stream ended without final response payload", true
+		}
+		return "Upstream non-streaming SSE ended without final response payload", true
+	}
+	if isOpenAIRemoteCompactRequest(c) {
+		return "Upstream compact stream disconnected before completion", true
+	}
+	return "Upstream non-streaming SSE disconnected before completion", true
+}
+
+func buildOpenAINonStreamingProtocolFailover(resp *http.Response, message string) error {
+	message = sanitizeUpstreamErrorMessage(strings.TrimSpace(message))
+	if message == "" {
+		message = "Upstream returned an invalid non-streaming response"
+	}
+	payload := []byte(`{"error":{"type":"upstream_error","message":` + strconv.Quote(message) + `}}`)
+	headers := http.Header{}
+	if resp != nil && resp.Header != nil {
+		headers = resp.Header.Clone()
+	}
+	return &UpstreamFailoverError{
+		StatusCode:             http.StatusBadGateway,
+		ResponseBody:           payload,
+		ResponseHeaders:        headers,
+		RetryableOnSameAccount: true,
+	}
 }
 
 func extractOpenAISSETerminalEvent(body string) (string, []byte, bool) {
