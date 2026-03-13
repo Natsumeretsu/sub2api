@@ -343,13 +343,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if previousResponseID != "" && selection != nil && selection.Account != nil {
 			reqLog.Debug("openai.account_selected_with_previous_response_id", zap.Int64("account_id", selection.Account.ID))
 		}
-		if selection != nil && selection.Account != nil && openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, selection.Account.ID) {
+		selectedCrossAccount := selection != nil && selection.Account != nil &&
+			openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, selection.Account.ID)
+		if selectedCrossAccount {
 			service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
-			forceCacheBilling = true
 			reqLog = reqLog.With(
 				zap.Bool("account_switch_with_cache_drop", true),
 				zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
-				zap.Bool("force_cache_billing", true),
 			)
 		}
 		reqLog.Debug("openai.account_schedule_decision",
@@ -387,6 +387,28 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				streamStarted,
 			)
 			return
+		}
+		if selectedCrossAccount && openAIShouldBlockAnchoredCrossAccountSelection(anchor, previousResponseID, selection.Account.ID, scheduleDecision) {
+			service.RecordOpenAIWSContinuationAnchoredCrossAccountSwitchBlocked()
+			reqLog.Warn("openai.anchored_cross_account_selection_blocked",
+				zap.String("layer", scheduleDecision.Layer),
+				zap.Bool("has_previous_response_id", strings.TrimSpace(previousResponseID) != ""),
+				zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+				zap.Int64("sticky_account_id", anchor.StickyAccountID),
+				zap.Int64("selected_account_id", selection.Account.ID),
+			)
+			h.handleStreamingAwareError(
+				c,
+				http.StatusServiceUnavailable,
+				"api_error",
+				openAIAnchoredCrossAccountBlockedMessage(),
+				streamStarted,
+			)
+			return
+		}
+		if selectedCrossAccount {
+			forceCacheBilling = true
+			reqLog = reqLog.With(zap.Bool("force_cache_billing", true))
 		}
 		if scheduleDecision.CacheAffinityUsed {
 			service.RecordOpenAIWSContinuationCacheAffinitySelection()
@@ -483,6 +505,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						}
 						continue
 					}
+				}
+				if openAIShouldBlockAnchoredCrossAccountFailover(anchor, previousResponseID) {
+					service.RecordOpenAIWSContinuationAnchoredCrossAccountSwitchBlocked()
+					reqLog.Warn("openai.anchored_cross_account_failover_blocked",
+						zap.Int64("account_id", account.ID),
+						zap.Int("upstream_status", failoverErr.StatusCode),
+						zap.Bool("has_previous_response_id", strings.TrimSpace(previousResponseID) != ""),
+						zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+						zap.Int64("sticky_account_id", anchor.StickyAccountID),
+					)
+					h.handleStreamingAwareError(
+						c,
+						http.StatusServiceUnavailable,
+						"api_error",
+						openAIAnchoredCrossAccountBlockedMessage(),
+						streamStarted,
+					)
+					return
 				}
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				if openAIShouldForceCacheBillingAfterFailover(anchor, previousResponseID, failoverErr) {
@@ -1353,14 +1393,29 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	account := selection.Account
-	if account != nil && openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, account.ID) {
+	selectedCrossAccount := account != nil && openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, account.ID)
+	if selectedCrossAccount {
 		service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
-		wsForceCacheBilling = true
 		reqLog = reqLog.With(
 			zap.Bool("account_switch_with_cache_drop", true),
 			zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
-			zap.Bool("force_cache_billing", true),
 		)
+	}
+	if selectedCrossAccount && openAIShouldBlockAnchoredCrossAccountSelection(anchor, previousResponseID, account.ID, scheduleDecision) {
+		service.RecordOpenAIWSContinuationAnchoredCrossAccountSwitchBlocked()
+		reqLog.Warn("openai.websocket_anchored_cross_account_selection_blocked",
+			zap.String("layer", scheduleDecision.Layer),
+			zap.Bool("has_previous_response_id", strings.TrimSpace(previousResponseID) != ""),
+			zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+			zap.Int64("sticky_account_id", anchor.StickyAccountID),
+			zap.Int64("selected_account_id", account.ID),
+		)
+		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, openAIAnchoredCrossAccountBlockedMessage())
+		return
+	}
+	if selectedCrossAccount {
+		wsForceCacheBilling = true
+		reqLog = reqLog.With(zap.Bool("force_cache_billing", true))
 	}
 	accountMaxConcurrency := account.Concurrency
 	if selection.WaitPlan != nil && selection.WaitPlan.MaxConcurrency > 0 {
@@ -1798,6 +1853,14 @@ func openAIHasContinuationAnchor(anchor service.OpenAIWSContinuationAnchor, prev
 	return strings.TrimSpace(previousResponseID) != "" || anchor.StickyAccountID > 0 || anchor.FromSessionState
 }
 
+func openAIHasResponseBoundContinuation(anchor service.OpenAIWSContinuationAnchor, previousResponseID string) bool {
+	return strings.TrimSpace(previousResponseID) != "" || anchor.FromSessionState
+}
+
+func openAIAnchoredCrossAccountBlockedMessage() string {
+	return "Strong continuation anchor belongs to another upstream account; retry later to preserve session continuity and cache affinity"
+}
+
 func openAIShouldForceCacheBillingForSelectedAccount(anchor service.OpenAIWSContinuationAnchor, previousResponseID string, selectedAccountID int64) bool {
 	if !openAIHasContinuationAnchor(anchor, previousResponseID) {
 		return false
@@ -1806,6 +1869,28 @@ func openAIShouldForceCacheBillingForSelectedAccount(anchor service.OpenAIWSCont
 		return false
 	}
 	return selectedAccountID != anchor.StickyAccountID
+}
+
+func openAIShouldBlockAnchoredCrossAccountSelection(
+	anchor service.OpenAIWSContinuationAnchor,
+	previousResponseID string,
+	selectedAccountID int64,
+	scheduleDecision service.OpenAIAccountScheduleDecision,
+) bool {
+	if !openAIHasResponseBoundContinuation(anchor, previousResponseID) || selectedAccountID <= 0 {
+		return false
+	}
+	if strings.TrimSpace(scheduleDecision.Layer) == "previous_response_id" {
+		return false
+	}
+	if anchor.StickyAccountID > 0 && selectedAccountID == anchor.StickyAccountID {
+		return false
+	}
+	return true
+}
+
+func openAIShouldBlockAnchoredCrossAccountFailover(anchor service.OpenAIWSContinuationAnchor, previousResponseID string) bool {
+	return openAIHasResponseBoundContinuation(anchor, previousResponseID)
 }
 
 func openAIShouldForceCacheBillingAfterFailover(

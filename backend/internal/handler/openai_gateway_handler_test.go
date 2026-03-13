@@ -775,6 +775,59 @@ func TestOpenAIShouldForceCacheBillingForSelectedAccount(t *testing.T) {
 	require.False(t, openAIShouldForceCacheBillingForSelectedAccount(service.OpenAIWSContinuationAnchor{}, "", 99))
 }
 
+func TestOpenAIShouldBlockAnchoredCrossAccountSelection(t *testing.T) {
+	anchored := service.OpenAIWSContinuationAnchor{
+		StickyAccountID:  42,
+		FromSessionState: true,
+		StrongCohort:     true,
+	}
+	require.True(t, openAIShouldBlockAnchoredCrossAccountSelection(
+		anchored,
+		"",
+		99,
+		service.OpenAIAccountScheduleDecision{Layer: "load_balance"},
+	))
+	require.False(t, openAIShouldBlockAnchoredCrossAccountSelection(
+		anchored,
+		"",
+		42,
+		service.OpenAIAccountScheduleDecision{Layer: "session_hash"},
+	))
+	require.False(t, openAIShouldBlockAnchoredCrossAccountSelection(
+		anchored,
+		"resp_123",
+		99,
+		service.OpenAIAccountScheduleDecision{Layer: "previous_response_id"},
+	))
+	require.True(t, openAIShouldBlockAnchoredCrossAccountSelection(
+		service.OpenAIWSContinuationAnchor{},
+		"resp_123",
+		99,
+		service.OpenAIAccountScheduleDecision{Layer: "load_balance"},
+	))
+	require.False(t, openAIShouldBlockAnchoredCrossAccountSelection(
+		service.OpenAIWSContinuationAnchor{StickyAccountID: 42, StrongCohort: true},
+		"",
+		99,
+		service.OpenAIAccountScheduleDecision{Layer: "load_balance"},
+	))
+}
+
+func TestOpenAIShouldBlockAnchoredCrossAccountFailover(t *testing.T) {
+	require.True(t, openAIShouldBlockAnchoredCrossAccountFailover(
+		service.OpenAIWSContinuationAnchor{FromSessionState: true, StrongCohort: true},
+		"",
+	))
+	require.True(t, openAIShouldBlockAnchoredCrossAccountFailover(
+		service.OpenAIWSContinuationAnchor{},
+		"resp_123",
+	))
+	require.False(t, openAIShouldBlockAnchoredCrossAccountFailover(
+		service.OpenAIWSContinuationAnchor{StickyAccountID: 7, StrongCohort: true},
+		"",
+	))
+}
+
 func TestOpenAIShouldForceCacheBillingAfterFailover(t *testing.T) {
 	require.False(t, openAIShouldForceCacheBillingAfterFailover(service.OpenAIWSContinuationAnchor{}, "", nil))
 	require.True(t, openAIShouldForceCacheBillingAfterFailover(

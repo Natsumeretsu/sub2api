@@ -15,6 +15,7 @@ type OpenAIWSContinuationStatsSnapshot struct {
 	PreviousResponseRecoveredFromSessionTotal int64 `json:"previous_response_recovered_from_session_total"`
 	PreviousResponseStrippedMidSessionTotal   int64 `json:"previous_response_stripped_mid_session_total"`
 	AccountSwitchWithCacheDropTotal           int64 `json:"account_switch_with_cache_drop_total"`
+	AnchoredCrossAccountSwitchBlockedTotal    int64 `json:"anchored_cross_account_switch_blocked_total"`
 	StrongCohortFallbackTotal                 int64 `json:"strong_cohort_fallback_total"`
 	StrongCohortDegradeBlockedTotal           int64 `json:"strong_cohort_degrade_blocked_total"`
 	CacheAffinitySelectionTotal               int64 `json:"cache_affinity_selection_total"`
@@ -44,6 +45,7 @@ var (
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal atomic.Int64
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal   atomic.Int64
 	openAIWSContinuationAccountSwitchWithCacheDropTotal           atomic.Int64
+	openAIWSContinuationAnchoredCrossAccountSwitchBlockedTotal    atomic.Int64
 	openAIWSContinuationStrongCohortFallbackTotal                 atomic.Int64
 	openAIWSContinuationStrongCohortDegradeBlockedTotal           atomic.Int64
 	openAIWSContinuationCacheAffinitySelectionTotal               atomic.Int64
@@ -74,6 +76,7 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 		PreviousResponseRecoveredFromSessionTotal: openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Load(),
 		PreviousResponseStrippedMidSessionTotal:   openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Load(),
 		AccountSwitchWithCacheDropTotal:           openAIWSContinuationAccountSwitchWithCacheDropTotal.Load(),
+		AnchoredCrossAccountSwitchBlockedTotal:    openAIWSContinuationAnchoredCrossAccountSwitchBlockedTotal.Load(),
 		StrongCohortFallbackTotal:                 openAIWSContinuationStrongCohortFallbackTotal.Load(),
 		StrongCohortDegradeBlockedTotal:           openAIWSContinuationStrongCohortDegradeBlockedTotal.Load(),
 		CacheAffinitySelectionTotal:               openAIWSContinuationCacheAffinitySelectionTotal.Load(),
@@ -131,6 +134,10 @@ func RecordOpenAIWSContinuationPreviousResponseStrippedMidSession() {
 
 func RecordOpenAIWSContinuationAccountSwitchWithCacheDrop() {
 	openAIWSContinuationAccountSwitchWithCacheDropTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationAnchoredCrossAccountSwitchBlocked() {
+	openAIWSContinuationAnchoredCrossAccountSwitchBlockedTotal.Add(1)
 }
 
 func RecordOpenAIWSContinuationStrongCohortFallback() {
@@ -216,6 +223,7 @@ func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Store(0)
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Store(0)
 	openAIWSContinuationAccountSwitchWithCacheDropTotal.Store(0)
+	openAIWSContinuationAnchoredCrossAccountSwitchBlockedTotal.Store(0)
 	openAIWSContinuationStrongCohortFallbackTotal.Store(0)
 	openAIWSContinuationStrongCohortDegradeBlockedTotal.Store(0)
 	openAIWSContinuationCacheAffinitySelectionTotal.Store(0)
