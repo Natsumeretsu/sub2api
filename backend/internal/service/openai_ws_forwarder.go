@@ -3481,6 +3481,67 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				)
 				if forcePreferredConn {
 					if !turnPrevRecoveryTried && currentPreviousResponseID != "" {
+						expectedPrevForPingRecovery, expectedPrevFromSessionState := resolveOpenAIWSIngressExpectedPreviousResponseID(
+							stateStore,
+							groupID,
+							sessionHash,
+							lastTurnResponseID,
+						)
+						if hasFunctionCallOutput &&
+							expectedPrevForPingRecovery != "" &&
+							currentPreviousResponseID != expectedPrevForPingRecovery {
+							alignedPayload, changed, alignErr := alignStoreDisabledPreviousResponseID(
+								currentPayload,
+								expectedPrevForPingRecovery,
+							)
+							if alignErr != nil {
+								logOpenAIWSModeInfo(
+									"ingress_ws_preflight_ping_recovery_skip account_id=%d turn=%d conn_id=%s reason=align_error previous_response_id=%s expected_previous_response_id=%s from_session_state=%v cause=%s",
+									account.ID,
+									turn,
+									truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+									truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+									truncateOpenAIWSLogValue(expectedPrevForPingRecovery, openAIWSIDValueMaxLen),
+									expectedPrevFromSessionState,
+									truncateOpenAIWSLogValue(alignErr.Error(), openAIWSLogValueMaxLen),
+								)
+							} else if changed {
+								updatedWithInput, setInputErr := setOpenAIWSPayloadInputSequence(
+									alignedPayload,
+									currentTurnReplayInput,
+									currentTurnReplayInputExists,
+								)
+								if setInputErr != nil {
+									logOpenAIWSModeInfo(
+										"ingress_ws_preflight_ping_recovery_skip account_id=%d turn=%d conn_id=%s reason=set_full_input_error previous_response_id=%s expected_previous_response_id=%s from_session_state=%v cause=%s",
+										account.ID,
+										turn,
+										truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+										truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+										truncateOpenAIWSLogValue(expectedPrevForPingRecovery, openAIWSIDValueMaxLen),
+										expectedPrevFromSessionState,
+										truncateOpenAIWSLogValue(setInputErr.Error(), openAIWSLogValueMaxLen),
+									)
+								} else {
+									logOpenAIWSModeInfo(
+										"ingress_ws_preflight_ping_recovery account_id=%d turn=%d conn_id=%s action=align_previous_response_id_retry previous_response_id=%s expected_previous_response_id=%s from_session_state=%v",
+										account.ID,
+										turn,
+										truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+										truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+										truncateOpenAIWSLogValue(expectedPrevForPingRecovery, openAIWSIDValueMaxLen),
+										expectedPrevFromSessionState,
+									)
+									turnPrevRecoveryTried = true
+									turnPrevRecoveryAllowFreshConn = true
+									currentPayload = updatedWithInput
+									currentPayloadBytes = len(updatedWithInput)
+									resetSessionLease(true)
+									skipBeforeTurn = true
+									continue
+								}
+							}
+						}
 						updatedPayload, removed, dropErr := dropPreviousResponseIDFromRawPayload(currentPayload)
 						if dropErr != nil || !removed {
 							reason := "not_removed"
