@@ -201,6 +201,26 @@ func ValidateFunctionCallOutputContext(reqBody map[string]any) FunctionCallOutpu
 	return result
 }
 
+// FunctionCallOutputStandaloneRetryReason 返回 function_call_output 在不依赖
+// previous_response_id 时是否具备“自包含续链”条件。
+// 合法返回值：
+// - "tool_call_context"：input 已包含带 call_id 的 tool_call/function_call
+// - "item_reference"：input 通过 item_reference.id 覆盖了所有 call_id
+// - ""：当前 payload 仍依赖 previous_response_id 或上下文不完整
+func FunctionCallOutputStandaloneRetryReason(reqBody map[string]any) string {
+	validation := ValidateFunctionCallOutputContext(reqBody)
+	if !validation.HasFunctionCallOutput || validation.HasFunctionCallOutputMissingCallID {
+		return ""
+	}
+	if validation.HasToolCallContext {
+		return "tool_call_context"
+	}
+	if validation.HasItemReferenceForAllCallIDs {
+		return "item_reference"
+	}
+	return ""
+}
+
 // HasFunctionCallOutput 判断 input 是否包含 function_call_output，用于触发续链校验。
 func HasFunctionCallOutput(reqBody map[string]any) bool {
 	return AnalyzeToolContinuationSignals(reqBody).HasFunctionCallOutput

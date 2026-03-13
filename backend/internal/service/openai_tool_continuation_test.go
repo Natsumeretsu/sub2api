@@ -96,3 +96,33 @@ func TestHasItemReferenceForCallIDs(t *testing.T) {
 	require.True(t, HasItemReferenceForCallIDs(req, []string{"call_1", "call_2"}))
 	require.False(t, HasItemReferenceForCallIDs(req, []string{"call_1", "call_3"}))
 }
+
+func TestFunctionCallOutputStandaloneRetryReason(t *testing.T) {
+	require.Empty(t, FunctionCallOutputStandaloneRetryReason(nil))
+
+	require.Equal(t, "tool_call_context", FunctionCallOutputStandaloneRetryReason(map[string]any{
+		"input": []any{
+			map[string]any{"type": "function_call", "call_id": "call_1", "name": "run"},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+		},
+	}))
+
+	require.Equal(t, "item_reference", FunctionCallOutputStandaloneRetryReason(map[string]any{
+		"input": []any{
+			map[string]any{"type": "item_reference", "id": "call_1"},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+		},
+	}))
+
+	require.Empty(t, FunctionCallOutputStandaloneRetryReason(map[string]any{
+		"input": []any{
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+		},
+	}))
+
+	require.Empty(t, FunctionCallOutputStandaloneRetryReason(map[string]any{
+		"input": []any{
+			map[string]any{"type": "function_call_output", "output": "ok"},
+		},
+	}))
+}
