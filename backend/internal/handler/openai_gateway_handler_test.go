@@ -667,6 +667,30 @@ func TestOpenAIResponsesTurnKey_DerivesStableFallbackWhenClientRequestIDIsGatewa
 	require.True(t, strings.HasPrefix(first, "derived:"))
 }
 
+func TestOpenAIShouldForceCacheBillingForSelectedAccount(t *testing.T) {
+	anchor := service.OpenAIWSContinuationAnchor{
+		StickyAccountID: 42,
+		StrongCohort:    true,
+	}
+	require.True(t, openAIShouldForceCacheBillingForSelectedAccount(anchor, "resp_123", 99))
+	require.False(t, openAIShouldForceCacheBillingForSelectedAccount(anchor, "resp_123", 42))
+	require.False(t, openAIShouldForceCacheBillingForSelectedAccount(service.OpenAIWSContinuationAnchor{}, "", 99))
+}
+
+func TestOpenAIShouldForceCacheBillingAfterFailover(t *testing.T) {
+	require.False(t, openAIShouldForceCacheBillingAfterFailover(service.OpenAIWSContinuationAnchor{}, "", nil))
+	require.True(t, openAIShouldForceCacheBillingAfterFailover(
+		service.OpenAIWSContinuationAnchor{StickyAccountID: 7},
+		"resp_123",
+		&service.UpstreamFailoverError{StatusCode: http.StatusBadGateway},
+	))
+	require.True(t, openAIShouldForceCacheBillingAfterFailover(
+		service.OpenAIWSContinuationAnchor{},
+		"",
+		&service.UpstreamFailoverError{StatusCode: http.StatusServiceUnavailable, ForceCacheBilling: true},
+	))
+}
+
 func TestOpenAIHandleFailoverRetryBlockedAfterEmit_RecordsStatsWithoutOverwritingBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service.ResetOpenAIWSContinuationStatsForTest()

@@ -335,6 +335,36 @@ func TestOpenAIGatewayServiceRecordUsage_ClampsActualInputTokensToZero(t *testin
 	require.Equal(t, 0, usageRepo.lastLog.InputTokens)
 }
 
+func TestOpenAIGatewayServiceRecordUsage_ForceCacheBillingMovesInputToCacheRead(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp_force_cache_billing",
+			Usage: OpenAIUsage{
+				InputTokens:  128,
+				OutputTokens: 16,
+			},
+			Model:    "gpt-5.4",
+			Duration: time.Second,
+		},
+		APIKey:            &APIKey{ID: 1007},
+		User:              &User{ID: 2007},
+		Account:           &Account{ID: 3007},
+		ForceCacheBilling: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, 0, usageRepo.lastLog.InputTokens)
+	require.Equal(t, 128, usageRepo.lastLog.CacheReadTokens)
+	require.Zero(t, usageRepo.lastLog.InputCost)
+	require.NotZero(t, usageRepo.lastLog.CacheReadCost)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_Gpt54LongContextBillsWholeSession(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}

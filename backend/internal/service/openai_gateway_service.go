@@ -3961,14 +3961,15 @@ func (s *OpenAIGatewayService) replaceModelInResponseBody(body []byte, fromModel
 
 // OpenAIRecordUsageInput input for recording usage
 type OpenAIRecordUsageInput struct {
-	Result        *OpenAIForwardResult
-	APIKey        *APIKey
-	User          *User
-	Account       *Account
-	Subscription  *UserSubscription
-	UserAgent     string // 请求的 User-Agent
-	IPAddress     string // 请求的客户端 IP 地址
-	APIKeyService APIKeyQuotaUpdater
+	Result            *OpenAIForwardResult
+	APIKey            *APIKey
+	User              *User
+	Account           *Account
+	Subscription      *UserSubscription
+	UserAgent         string // 请求的 User-Agent
+	IPAddress         string // 请求的客户端 IP 地址
+	ForceCacheBilling bool
+	APIKeyService     APIKeyQuotaUpdater
 }
 
 // RecordUsage records usage and deducts balance
@@ -3985,6 +3986,18 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	user := input.User
 	account := input.Account
 	subscription := input.Subscription
+
+	if (input.ForceCacheBilling || IsForceCacheBilling(ctx)) && result.Usage.InputTokens > 0 {
+		logger.LegacyPrintf(
+			"service.openai_gateway",
+			"force_cache_billing: %d input_tokens → cache_read_input_tokens (account=%d request_id=%s)",
+			result.Usage.InputTokens,
+			account.ID,
+			strings.TrimSpace(result.RequestID),
+		)
+		result.Usage.CacheReadInputTokens += result.Usage.InputTokens
+		result.Usage.InputTokens = 0
+	}
 
 	// 计算实际的新输入token（减去缓存读取的token）
 	// 因为 input_tokens 包含了 cache_read_tokens，而缓存读取的token不应按输入价格计费

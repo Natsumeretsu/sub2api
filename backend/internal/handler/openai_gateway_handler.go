@@ -218,6 +218,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	turnCompleted := false
 	turnEmitted := false
 	turnKey := ""
+	forceCacheBilling := false
 	turnStoredState := service.OpenAIResponsesTurnStoredState{
 		ClientRequestID: openAIResponsesClientRequestID(c),
 	}
@@ -341,11 +342,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if previousResponseID != "" && selection != nil && selection.Account != nil {
 			reqLog.Debug("openai.account_selected_with_previous_response_id", zap.Int64("account_id", selection.Account.ID))
 		}
-		if anchor.StickyAccountID > 0 && selection != nil && selection.Account != nil && selection.Account.ID != anchor.StickyAccountID {
+		if selection != nil && selection.Account != nil && openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, selection.Account.ID) {
 			service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
+			forceCacheBilling = true
 			reqLog = reqLog.With(
 				zap.Bool("account_switch_with_cache_drop", true),
 				zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
+				zap.Bool("force_cache_billing", true),
 			)
 		}
 		reqLog.Debug("openai.account_schedule_decision",
@@ -427,6 +430,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					}
 				}
 				h.gatewayService.RecordOpenAIAccountSwitch()
+				if openAIShouldForceCacheBillingAfterFailover(anchor, previousResponseID, failoverErr) {
+					forceCacheBilling = true
+				}
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
 				if switchCount >= maxAccountSwitches {
@@ -478,14 +484,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
 		h.submitUsageRecordTask(func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-				Result:        result,
-				APIKey:        apiKey,
-				User:          apiKey.User,
-				Account:       account,
-				Subscription:  subscription,
-				UserAgent:     userAgent,
-				IPAddress:     clientIP,
-				APIKeyService: h.apiKeyService,
+				Result:            result,
+				APIKey:            apiKey,
+				User:              apiKey.User,
+				Account:           account,
+				Subscription:      subscription,
+				UserAgent:         userAgent,
+				IPAddress:         clientIP,
+				ForceCacheBilling: forceCacheBilling,
+				APIKeyService:     h.apiKeyService,
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.responses"),
@@ -1207,6 +1214,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		zap.String("previous_response_id_kind", previousResponseIDKind),
 	)
 	setOpsRequestContext(c, reqModel, true, firstMessage)
+	wsForceCacheBilling := false
 
 	var currentUserRelease func()
 	var currentAccountRelease func()
@@ -1247,6 +1255,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		firstMessage,
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
+	anchor := h.gatewayService.ResolveOpenAIWSContinuationAnchor(ctx, apiKey.GroupID, sessionHash, previousResponseID)
 	wsPromptCacheKey := strings.TrimSpace(gjson.GetBytes(firstMessage, "prompt_cache_key").String())
 	selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
 		ctx,
@@ -1269,6 +1278,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	account := selection.Account
+	if account != nil && openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, account.ID) {
+		service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
+		wsForceCacheBilling = true
+		reqLog = reqLog.With(
+			zap.Bool("account_switch_with_cache_drop", true),
+			zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
+			zap.Bool("force_cache_billing", true),
+		)
+	}
 	accountMaxConcurrency := account.Concurrency
 	if selection.WaitPlan != nil && selection.WaitPlan.MaxConcurrency > 0 {
 		accountMaxConcurrency = selection.WaitPlan.MaxConcurrency
@@ -1357,14 +1375,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
 			h.submitUsageRecordTask(func(taskCtx context.Context) {
 				if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
-					Result:        result,
-					APIKey:        apiKey,
-					User:          apiKey.User,
-					Account:       account,
-					Subscription:  subscription,
-					UserAgent:     userAgent,
-					IPAddress:     clientIP,
-					APIKeyService: h.apiKeyService,
+					Result:            result,
+					APIKey:            apiKey,
+					User:              apiKey.User,
+					Account:           account,
+					Subscription:      subscription,
+					UserAgent:         userAgent,
+					IPAddress:         clientIP,
+					ForceCacheBilling: wsForceCacheBilling,
+					APIKeyService:     h.apiKeyService,
 				}); err != nil {
 					reqLog.Error("openai.websocket_record_usage_failed",
 						zap.Int64("account_id", account.ID),
@@ -1684,6 +1703,34 @@ func openAIResponsesRequiredCohort(requiredTransport service.OpenAIUpstreamTrans
 		return string(service.OpenAIContinuationCohortStrong)
 	}
 	return string(service.OpenAIContinuationCohortDegraded)
+}
+
+func openAIHasContinuationAnchor(anchor service.OpenAIWSContinuationAnchor, previousResponseID string) bool {
+	return strings.TrimSpace(previousResponseID) != "" || anchor.StickyAccountID > 0 || anchor.FromSessionState
+}
+
+func openAIShouldForceCacheBillingForSelectedAccount(anchor service.OpenAIWSContinuationAnchor, previousResponseID string, selectedAccountID int64) bool {
+	if !openAIHasContinuationAnchor(anchor, previousResponseID) {
+		return false
+	}
+	if anchor.StickyAccountID <= 0 || selectedAccountID <= 0 {
+		return false
+	}
+	return selectedAccountID != anchor.StickyAccountID
+}
+
+func openAIShouldForceCacheBillingAfterFailover(
+	anchor service.OpenAIWSContinuationAnchor,
+	previousResponseID string,
+	failoverErr *service.UpstreamFailoverError,
+) bool {
+	if failoverErr == nil {
+		return false
+	}
+	if failoverErr.ForceCacheBilling {
+		return true
+	}
+	return openAIHasContinuationAnchor(anchor, previousResponseID)
 }
 
 func (h *OpenAIGatewayHandler) handleOpenAIResponsesTurnReuseConflict(c *gin.Context, duplicate *service.OpenAIResponsesTurnDuplicate) {
