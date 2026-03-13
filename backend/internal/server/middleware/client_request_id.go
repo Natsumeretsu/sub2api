@@ -27,8 +27,9 @@ func ClientRequestID() gin.HandlerFunc {
 			return
 		}
 
-		id := resolveClientRequestID(c.Request)
+		id, provided := resolveClientRequestID(c.Request)
 		ctx := context.WithValue(c.Request.Context(), ctxkey.ClientRequestID, id)
+		ctx = context.WithValue(ctx, ctxkey.ClientRequestIDProvided, provided)
 		requestLogger := logger.FromContext(ctx).With(zap.String("client_request_id", strings.TrimSpace(id)))
 		ctx = logger.IntoContext(ctx, requestLogger)
 		c.Request = c.Request.WithContext(ctx)
@@ -36,13 +37,13 @@ func ClientRequestID() gin.HandlerFunc {
 	}
 }
 
-func resolveClientRequestID(r *http.Request) string {
+func resolveClientRequestID(r *http.Request) (string, bool) {
 	if r != nil {
 		for _, key := range []string{"X-Client-Request-ID", "Client-Request-ID"} {
 			if value := strings.TrimSpace(r.Header.Get(key)); value != "" {
-				return value
+				return value, true
 			}
 		}
 	}
-	return uuid.New().String()
+	return uuid.New().String(), false
 }

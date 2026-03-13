@@ -633,16 +633,38 @@ func TestOpenAIResponsesTurnKey_UsesClientRequestID(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxkey.ClientRequestID, "creq-turn-1"))
+	reqCtx := context.WithValue(req.Context(), ctxkey.ClientRequestID, "creq-turn-1")
+	reqCtx = context.WithValue(reqCtx, ctxkey.ClientRequestIDProvided, true)
+	req = req.WithContext(reqCtx)
 	c.Request = req
 
-	first := openAIResponsesTurnKey(c, "session_hash_1", "resp_prev_1")
-	second := openAIResponsesTurnKey(c, "session_hash_1", "resp_prev_1")
-	changed := openAIResponsesTurnKey(c, "session_hash_2", "resp_prev_1")
+	first := openAIResponsesTurnKey(c, "session_hash_1", []byte(`{"model":"gpt-5.4","input":"hello","previous_response_id":"resp_prev_1"}`))
+	second := openAIResponsesTurnKey(c, "session_hash_1", []byte(`{"model":"gpt-5.4","input":"hello","previous_response_id":"resp_prev_2"}`))
+	changed := openAIResponsesTurnKey(c, "session_hash_2", []byte(`{"model":"gpt-5.4","input":"hello","previous_response_id":"resp_prev_1"}`))
 
 	require.Equal(t, first, second)
 	require.NotEqual(t, first, changed)
-	require.True(t, strings.HasPrefix(first, "creq-turn-1:"))
+	require.True(t, strings.HasPrefix(first, "client:creq-turn-1:"))
+}
+
+func TestOpenAIResponsesTurnKey_DerivesStableFallbackWhenClientRequestIDIsGatewayGenerated(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+	reqCtx := context.WithValue(req.Context(), ctxkey.ClientRequestID, "generated-creq-1")
+	reqCtx = context.WithValue(reqCtx, ctxkey.ClientRequestIDProvided, false)
+	req = req.WithContext(reqCtx)
+	c.Request = req
+
+	first := openAIResponsesTurnKey(c, "session_hash_1", []byte(`{"model":"gpt-5.4","input":"hello","previous_response_id":"resp_prev_1"}`))
+	second := openAIResponsesTurnKey(c, "session_hash_1", []byte(`{"model":"gpt-5.4","input":"hello","previous_response_id":"resp_prev_1"}`))
+	changed := openAIResponsesTurnKey(c, "session_hash_1", []byte(`{"model":"gpt-5.4","input":"hello","previous_response_id":"resp_prev_2"}`))
+
+	require.Equal(t, first, second)
+	require.NotEqual(t, first, changed)
+	require.True(t, strings.HasPrefix(first, "derived:"))
 }
 
 func TestOpenAIHandleFailoverRetryBlockedAfterEmit_RecordsStatsWithoutOverwritingBody(t *testing.T) {

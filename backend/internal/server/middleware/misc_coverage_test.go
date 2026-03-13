@@ -27,6 +27,9 @@ func TestClientRequestID_GeneratesWhenMissing(t *testing.T) {
 		id, ok := v.(string)
 		require.True(t, ok)
 		require.NotEmpty(t, id)
+		provided, ok := c.Request.Context().Value(ctxkey.ClientRequestIDProvided).(bool)
+		require.True(t, ok)
+		require.False(t, provided)
 		c.Status(http.StatusOK)
 	})
 
@@ -45,6 +48,9 @@ func TestClientRequestID_PreservesExisting(t *testing.T) {
 		id, ok := c.Request.Context().Value(ctxkey.ClientRequestID).(string)
 		require.True(t, ok)
 		require.Equal(t, "keep", id)
+		provided, ok := c.Request.Context().Value(ctxkey.ClientRequestIDProvided).(bool)
+		require.True(t, ok)
+		require.False(t, provided)
 		c.Status(http.StatusOK)
 	})
 
@@ -64,6 +70,9 @@ func TestClientRequestID_UsesInboundHeaderWhenPresent(t *testing.T) {
 		id, ok := c.Request.Context().Value(ctxkey.ClientRequestID).(string)
 		require.True(t, ok)
 		require.Equal(t, "creq-header-1", id)
+		provided, ok := c.Request.Context().Value(ctxkey.ClientRequestIDProvided).(bool)
+		require.True(t, ok)
+		require.True(t, provided)
 		c.Status(http.StatusOK)
 	})
 

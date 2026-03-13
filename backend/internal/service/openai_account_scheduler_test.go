@@ -500,6 +500,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_LoadBalanceTopKFallback
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue = 1.0
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 0.2
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 0.1
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.CacheAffinity = 1.3
 
 	concurrencyCache := stubConcurrencyCache{
 		loadMap: map[int64]*AccountLoadInfo{
@@ -742,6 +743,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_LoadBalanceDistributesA
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue = 1
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 1
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 1
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.CacheAffinity = 1
 
 	concurrencyCache := stubConcurrencyCache{
 		loadMap: map[int64]*AccountLoadInfo{
@@ -893,6 +895,7 @@ func TestDefaultOpenAIAccountScheduler_ReportSwitchAndSnapshot(t *testing.T) {
 	require.Equal(t, int64(1), snapshot.StickySessionHitTotal)
 	require.Equal(t, int64(1), snapshot.LoadBalanceSelectTotal)
 	require.Equal(t, int64(1), snapshot.AccountSwitchTotal)
+	require.Equal(t, int64(0), snapshot.CacheAffinitySelectTotal)
 	require.Greater(t, snapshot.SchedulerLatencyMsAvg, 0.0)
 	require.Greater(t, snapshot.StickyHitRatio, 0.0)
 	require.Greater(t, snapshot.LoadSkewAvg, 0.0)
@@ -923,6 +926,7 @@ func TestOpenAIGatewayService_SchedulerWrappersAndDefaults(t *testing.T) {
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue = 0.4
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 0.5
 	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 0.6
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.CacheAffinity = 0.7
 	svcWithCfg := &OpenAIGatewayService{cfg: cfg}
 
 	require.Equal(t, 9, svcWithCfg.openAIWSLBTopK())
@@ -933,6 +937,7 @@ func TestOpenAIGatewayService_SchedulerWrappersAndDefaults(t *testing.T) {
 	require.Equal(t, 0.4, customWeights.Queue)
 	require.Equal(t, 0.5, customWeights.ErrorRate)
 	require.Equal(t, 0.6, customWeights.TTFT)
+	require.Equal(t, 0.7, customWeights.CacheAffinity)
 }
 
 func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *testing.T) {
@@ -1041,6 +1046,79 @@ func TestDefaultOpenAIAccountScheduler_Select_FallsBackToDegradedCohortWhenStron
 	require.True(t, decision.CohortFallback)
 	metrics := scheduler.SnapshotMetrics()
 	require.Equal(t, int64(1), metrics.CohortFallbackTotal)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_PrefersCacheAffinityKey(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(9901)
+	accounts := []Account{
+		{
+			ID:          99011,
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Schedulable: true,
+			Concurrency: 2,
+			Priority:    0,
+		},
+		{
+			ID:          99012,
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Schedulable: true,
+			Concurrency: 2,
+			Priority:    0,
+		},
+	}
+
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.LBTopK = 1
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Priority = 0
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Load = 0
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue = 0
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 0
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 0
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.CacheAffinity = 1
+
+	svc := &OpenAIGatewayService{
+		accountRepo: stubOpenAIAccountRepo{accounts: accounts},
+		cache:       &stubGatewayCache{sessionBindings: map[string]int64{}},
+		cfg:         cfg,
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{loadMap: map[int64]*AccountLoadInfo{
+			99011: {AccountID: 99011, LoadRate: 0, WaitingCount: 0},
+			99012: {AccountID: 99012, LoadRate: 0, WaitingCount: 0},
+		}}),
+	}
+
+	cacheAffinityKey := "prompt-cache-key-strong-affinity"
+	expectedID := accounts[0].ID
+	expectedScore := computeOpenAICacheAffinityScore(cacheAffinityKey, accounts[0].ID)
+	if score := computeOpenAICacheAffinityScore(cacheAffinityKey, accounts[1].ID); score > expectedScore {
+		expectedID = accounts[1].ID
+		expectedScore = score
+	}
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"session_hash_affinity",
+		"gpt-5.4",
+		nil,
+		OpenAIUpstreamTransportAny,
+		cacheAffinityKey,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, expectedID, selection.Account.ID)
+	require.True(t, decision.CacheAffinityUsed)
+	require.InDelta(t, expectedScore, decision.CacheAffinityScore, 1e-12)
+	require.Equal(t, int64(1), svc.SnapshotOpenAIAccountSchedulerMetrics().CacheAffinitySelectTotal)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}

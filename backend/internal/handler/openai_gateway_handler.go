@@ -157,6 +157,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	reqStream := streamResult.Bool()
+	promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
 	if previousResponseID != "" {
@@ -204,12 +205,70 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if anchor.FromSessionState && previousResponseID != "" {
 		c.Set(service.OpenAIContinuationPrevRecoveredCtxKey, true)
 	}
+	requiredTransport := service.ResolveOpenAIWSRequiredTransportForAnchor(anchor)
 
 	setOpsRequestContext(c, reqModel, reqStream, body)
 
 	// 提前校验 function_call_output 是否具备可关联上下文，避免上游 400。
 	if !h.validateFunctionCallOutputRequest(c, body, reqLog) {
 		return
+	}
+
+	var turnTicket *service.OpenAIResponsesTurnTicket
+	turnCompleted := false
+	turnEmitted := false
+	turnKey := ""
+	turnStoredState := service.OpenAIResponsesTurnStoredState{
+		ClientRequestID: openAIResponsesClientRequestID(c),
+	}
+	if !remoteCompact {
+		groupID := int64(0)
+		if apiKey.GroupID != nil {
+			groupID = *apiKey.GroupID
+		}
+		turnKey = openAIResponsesTurnKey(c, sessionHash, body)
+		turnDescriptor := service.OpenAIResponsesTurnDescriptor{
+			SessionHash:        sessionHash,
+			PromptCacheKey:     promptCacheKey,
+			Model:              reqModel,
+			ClientRequestID:    openAIResponsesClientRequestID(c),
+			RequestedTransport: string(requiredTransport),
+			RequestedCohort:    openAIResponsesRequiredCohort(requiredTransport),
+			PayloadFingerprint: service.BuildOpenAIResponsesTurnPayloadFingerprint(body),
+			Stream:             reqStream,
+			TurnOrdinal:        1,
+		}
+		beginTicket, duplicateTurn, beginErr := h.gatewayService.BeginOpenAIResponsesTurn(
+			c.Request.Context(),
+			groupID,
+			turnKey,
+			turnDescriptor,
+		)
+		if beginErr != nil {
+			reqLog.Warn("openai.turn_begin_failed", zap.Error(beginErr), zap.String("turn_key", turnKey))
+			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Turn idempotency store unavailable", streamStarted)
+			return
+		}
+		if duplicateTurn != nil {
+			service.RecordOpenAIWSContinuationTurnReuseConflict(duplicateTurn.Phase)
+			h.handleOpenAIResponsesTurnReuseConflict(c, duplicateTurn)
+			return
+		}
+		turnTicket = beginTicket
+		defer func() {
+			if turnTicket == nil {
+				return
+			}
+			if turnCompleted {
+				_ = h.gatewayService.MarkOpenAIResponsesTurnCompleted(c.Request.Context(), turnTicket, turnStoredState)
+				return
+			}
+			if turnEmitted {
+				_ = h.gatewayService.MarkOpenAIResponsesTurnEmitted(c.Request.Context(), turnTicket, turnStoredState)
+				return
+			}
+			_ = h.gatewayService.MarkOpenAIResponsesTurnRetryable(c.Request.Context(), turnTicket, "OPENAI_TURN_ABORTED_BEFORE_EMIT")
+		}()
 	}
 
 	// 绑定错误透传服务，允许 service 层在非 failover 错误场景复用规则。
@@ -240,9 +299,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	requiredTransport := service.ResolveOpenAIWSRequiredTransportForAnchor(anchor)
-	turnKey := openAIResponsesTurnKey(c, sessionHash, previousResponseID)
-
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	failedAccountIDs := make(map[int64]struct{})
@@ -260,6 +316,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			reqModel,
 			failedAccountIDs,
 			requiredTransport,
+			promptCacheKey,
 		)
 		if err != nil {
 			reqLog.Warn("openai.account_select_failed",
@@ -298,6 +355,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.String("requested_cohort", scheduleDecision.RequestedCohort),
 			zap.String("selected_cohort", scheduleDecision.SelectedCohort),
 			zap.Bool("cohort_fallback", scheduleDecision.CohortFallback),
+			zap.Bool("cache_affinity_used", scheduleDecision.CacheAffinityUsed),
+			zap.Float64("cache_affinity_score", scheduleDecision.CacheAffinityScore),
 			zap.Int("candidate_count", scheduleDecision.CandidateCount),
 			zap.Int("top_k", scheduleDecision.TopK),
 			zap.Int64("latency_ms", scheduleDecision.LatencyMs),
@@ -306,10 +365,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if scheduleDecision.CohortFallback && scheduleDecision.RequestedCohort == string(service.OpenAIContinuationCohortStrong) {
 			service.RecordOpenAIWSContinuationStrongCohortFallback()
 		}
+		if scheduleDecision.CacheAffinityUsed {
+			service.RecordOpenAIWSContinuationCacheAffinitySelection()
+		}
 		account := selection.Account
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+		turnStoredState.AccountID = account.ID
+		turnStoredState.Cohort = scheduleDecision.SelectedCohort
+		turnStoredState.Transport = string(requiredTransport)
 
 		accountReleaseFunc, acquired := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
 		if !acquired {
@@ -338,6 +403,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			if errors.As(err, &failoverErr) {
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 				if openAIResponsesTurnStarted(c, streamStarted) {
+					turnEmitted = true
 					h.handleOpenAIFailoverRetryBlockedAfterEmit(c, reqLog, account.ID, turnKey, failoverErr, streamStarted)
 					return
 				}
@@ -377,7 +443,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				continue
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+			turnStartedBeforeFallback := openAIResponsesTurnStarted(c, streamStarted)
 			wroteFallback := h.ensureForwardErrorResponse(c, streamStarted)
+			if turnStartedBeforeFallback {
+				turnEmitted = true
+			}
 			fields := []zap.Field{
 				zap.Int64("account_id", account.ID),
 				zap.Bool("fallback_error_response_written", wroteFallback),
@@ -395,9 +465,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
+			turnStoredState.ResponseID = strings.TrimSpace(result.RequestID)
 		} else {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, nil)
 		}
+		turnCompleted = true
 
 		// 捕获请求信息（用于异步记录，避免在 goroutine 中访问 gin.Context）
 		userAgent := c.GetHeader("User-Agent")
@@ -1175,6 +1247,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		firstMessage,
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
+	wsPromptCacheKey := strings.TrimSpace(gjson.GetBytes(firstMessage, "prompt_cache_key").String())
 	selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
 		ctx,
 		apiKey.GroupID,
@@ -1183,6 +1256,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		reqModel,
 		nil,
 		service.OpenAIUpstreamTransportResponsesWebsocketV2,
+		wsPromptCacheKey,
 	)
 	if err != nil {
 		reqLog.Warn("openai.websocket_account_select_failed", zap.Error(err))
@@ -1558,7 +1632,7 @@ func openAIResponsesTurnStarted(c *gin.Context, streamStarted bool) bool {
 	return c.Writer.Written()
 }
 
-func openAIResponsesTurnKey(c *gin.Context, sessionHash string, previousResponseID string) string {
+func openAIResponsesClientRequestID(c *gin.Context) string {
 	clientRequestID := ""
 	if c != nil && c.Request != nil {
 		if value, ok := c.Request.Context().Value(ctxkey.ClientRequestID).(string); ok {
@@ -1568,11 +1642,66 @@ func openAIResponsesTurnKey(c *gin.Context, sessionHash string, previousResponse
 	if clientRequestID == "" {
 		clientRequestID = "unknown-client-request"
 	}
+	return clientRequestID
+}
+
+func openAIResponsesClientRequestIDProvided(c *gin.Context) bool {
+	if c != nil && c.Request != nil {
+		if value, ok := c.Request.Context().Value(ctxkey.ClientRequestIDProvided).(bool); ok {
+			return value
+		}
+	}
+	return false
+}
+
+func openAIResponsesTurnKey(c *gin.Context, sessionHash string, body []byte) string {
+	clientRequestID := openAIResponsesClientRequestID(c)
+	if clientRequestID == "" {
+		clientRequestID = "unknown-client-request"
+	}
+	provided := openAIResponsesClientRequestIDProvided(c)
+	previousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
 	hasher := fnv.New64a()
 	_, _ = hasher.Write([]byte(strings.TrimSpace(sessionHash)))
 	_, _ = hasher.Write([]byte{0})
-	_, _ = hasher.Write([]byte(strings.TrimSpace(previousResponseID)))
-	return clientRequestID + ":" + strconv.FormatUint(hasher.Sum64(), 16)
+	if !provided {
+		_, _ = hasher.Write([]byte(previousResponseID))
+		_, _ = hasher.Write([]byte{0})
+	}
+	_, _ = hasher.Write([]byte(service.BuildOpenAIResponsesTurnPayloadFingerprint(body)))
+	derived := strconv.FormatUint(hasher.Sum64(), 16)
+	if provided {
+		return "client:" + clientRequestID + ":" + derived
+	}
+	if strings.TrimSpace(sessionHash) != "" || previousResponseID != "" {
+		return "derived:" + derived
+	}
+	return "generated:" + clientRequestID + ":" + derived
+}
+
+func openAIResponsesRequiredCohort(requiredTransport service.OpenAIUpstreamTransport) string {
+	if requiredTransport == service.OpenAIUpstreamTransportResponsesWebsocketV2 {
+		return string(service.OpenAIContinuationCohortStrong)
+	}
+	return string(service.OpenAIContinuationCohortDegraded)
+}
+
+func (h *OpenAIGatewayHandler) handleOpenAIResponsesTurnReuseConflict(c *gin.Context, duplicate *service.OpenAIResponsesTurnDuplicate) {
+	if duplicate == nil {
+		h.errorResponse(c, http.StatusConflict, "conflict_error", "Same turn is already in progress")
+		return
+	}
+	message := "Same turn is already in progress; retry later with the same client_request_id"
+	switch strings.TrimSpace(duplicate.Phase) {
+	case string(service.OpenAIResponsesTurnPhaseEmitted):
+		message = "Same turn already emitted downstream; gateway blocked silent replay to avoid duplicate answers"
+	case string(service.OpenAIResponsesTurnPhaseCompleted):
+		message = "Same turn already completed; gateway blocked duplicate replay"
+	}
+	if duplicate.RetryAfterSecond > 0 {
+		c.Header("Retry-After", strconv.Itoa(duplicate.RetryAfterSecond))
+	}
+	h.errorResponse(c, http.StatusConflict, "conflict_error", message)
 }
 
 func (h *OpenAIGatewayHandler) handleOpenAIFailoverRetryBlockedAfterEmit(

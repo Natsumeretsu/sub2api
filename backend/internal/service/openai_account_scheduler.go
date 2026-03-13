@@ -3,6 +3,8 @@ package service
 import (
 	"container/heap"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"hash/fnv"
 	"math"
@@ -33,6 +35,7 @@ type OpenAIAccountScheduleRequest struct {
 	StickyAccountID    int64
 	PreviousResponseID string
 	RequestedModel     string
+	CacheAffinityKey   string
 	RequiredTransport  OpenAIUpstreamTransport
 	RequiredCohort     OpenAIContinuationCohort
 	ExcludedIDs        map[int64]struct{}
@@ -45,6 +48,8 @@ type OpenAIAccountScheduleDecision struct {
 	RequestedCohort     string
 	SelectedCohort      string
 	CohortFallback      bool
+	CacheAffinityUsed   bool
+	CacheAffinityScore  float64
 	CandidateCount      int
 	TopK                int
 	LatencyMs           int64
@@ -60,6 +65,7 @@ type OpenAIAccountSchedulerMetricsSnapshot struct {
 	LoadBalanceSelectTotal   int64
 	AccountSwitchTotal       int64
 	CohortFallbackTotal      int64
+	CacheAffinitySelectTotal int64
 	SchedulerLatencyMsTotal  int64
 	SchedulerLatencyMsAvg    float64
 	StickyHitRatio           float64
@@ -82,6 +88,7 @@ type openAIAccountSchedulerMetrics struct {
 	loadBalanceSelectTotal atomic.Int64
 	accountSwitchTotal     atomic.Int64
 	cohortFallbackTotal    atomic.Int64
+	cacheAffinityTotal     atomic.Int64
 	latencyMsTotal         atomic.Int64
 	loadSkewMilliTotal     atomic.Int64
 }
@@ -104,6 +111,9 @@ func (m *openAIAccountSchedulerMetrics) recordSelect(decision OpenAIAccountSched
 	}
 	if decision.CohortFallback {
 		m.cohortFallbackTotal.Add(1)
+	}
+	if decision.CacheAffinityUsed {
+		m.cacheAffinityTotal.Add(1)
 	}
 }
 
@@ -243,6 +253,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	decision := OpenAIAccountScheduleDecision{}
 	req.RequiredCohort = normalizeOpenAIRequiredCohort(req.RequiredCohort, req.RequiredTransport)
+	req.CacheAffinityKey = normalizeOpenAICacheAffinityKey(req.CacheAffinityKey, req.SessionHash, req.PreviousResponseID, req.RequestedModel)
 	decision.RequestedCohort = string(req.RequiredCohort)
 	start := time.Now()
 	defer func() {
@@ -306,6 +317,10 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		decision.SelectedAccountID = selection.Account.ID
 		decision.SelectedAccountType = selection.Account.Type
 		decision.SelectedCohort = string(s.resolveAccountContinuationCohort(selection.Account))
+		if req.CacheAffinityKey != "" {
+			decision.CacheAffinityUsed = true
+			decision.CacheAffinityScore = computeOpenAICacheAffinityScore(req.CacheAffinityKey, selection.Account.ID)
+		}
 	}
 	return selection, decision, nil
 }
@@ -386,6 +401,7 @@ type openAIAccountCandidateScore struct {
 	errorRate float64
 	ttft      float64
 	hasTTFT   bool
+	affinity  float64
 }
 
 type openAIAccountCandidateHeap []openAIAccountCandidateScore
@@ -510,6 +526,7 @@ func deriveOpenAISelectionSeed(req OpenAIAccountScheduleRequest) uint64 {
 	writeValue(req.SessionHash)
 	writeValue(req.PreviousResponseID)
 	writeValue(req.RequestedModel)
+	writeValue(req.CacheAffinityKey)
 	if req.GroupID != nil {
 		_, _ = hasher.Write([]byte(strconv.FormatInt(*req.GroupID, 10)))
 	}
@@ -709,12 +726,15 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		if item.hasTTFT && hasTTFTSample && maxTTFT > minTTFT {
 			ttftFactor = 1 - clamp01((item.ttft-minTTFT)/(maxTTFT-minTTFT))
 		}
+		affinityFactor := computeOpenAICacheAffinityScore(req.CacheAffinityKey, item.account.ID)
+		item.affinity = affinityFactor
 
 		item.score = weights.Priority*priorityFactor +
 			weights.Load*loadFactor +
 			weights.Queue*queueFactor +
 			weights.ErrorRate*errorFactor +
-			weights.TTFT*ttftFactor
+			weights.TTFT*ttftFactor +
+			weights.CacheAffinity*affinityFactor
 	}
 	if len(candidates) == 0 {
 		return nil, 0, 0, 0, cohortFallback, errors.New("no available OpenAI accounts")
@@ -795,6 +815,40 @@ func normalizeOpenAIRequiredCohort(requiredCohort OpenAIContinuationCohort, requ
 	return OpenAIContinuationCohortDegraded
 }
 
+func normalizeOpenAICacheAffinityKey(cacheAffinityKey string, sessionHash string, previousResponseID string, requestedModel string) string {
+	cacheAffinityKey = strings.TrimSpace(cacheAffinityKey)
+	if cacheAffinityKey != "" {
+		return cacheAffinityKey
+	}
+	sessionHash = strings.TrimSpace(sessionHash)
+	previousResponseID = strings.TrimSpace(previousResponseID)
+	requestedModel = strings.TrimSpace(requestedModel)
+	if sessionHash == "" && previousResponseID == "" {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if sessionHash != "" {
+		parts = append(parts, sessionHash)
+	}
+	if previousResponseID != "" {
+		parts = append(parts, previousResponseID)
+	}
+	if requestedModel != "" {
+		parts = append(parts, requestedModel)
+	}
+	return strings.Join(parts, "|")
+}
+
+func computeOpenAICacheAffinityScore(cacheAffinityKey string, accountID int64) float64 {
+	cacheAffinityKey = strings.TrimSpace(cacheAffinityKey)
+	if cacheAffinityKey == "" || accountID <= 0 {
+		return 0
+	}
+	sum := sha256.Sum256([]byte(cacheAffinityKey + "|" + strconv.FormatInt(accountID, 10)))
+	value := binary.BigEndian.Uint64(sum[:8])
+	return float64(value) / float64(math.MaxUint64)
+}
+
 func (s *defaultOpenAIAccountScheduler) resolveAccountContinuationCohort(account *Account) OpenAIContinuationCohort {
 	if s == nil || s.service == nil || account == nil {
 		return OpenAIContinuationCohortDegraded
@@ -838,6 +892,7 @@ func (s *defaultOpenAIAccountScheduler) SnapshotMetrics() OpenAIAccountScheduler
 		LoadBalanceSelectTotal:   s.metrics.loadBalanceSelectTotal.Load(),
 		AccountSwitchTotal:       switchTotal,
 		CohortFallbackTotal:      s.metrics.cohortFallbackTotal.Load(),
+		CacheAffinitySelectTotal: s.metrics.cacheAffinityTotal.Load(),
 		SchedulerLatencyMsTotal:  latencyTotal,
 		RuntimeStatsAccountCount: s.stats.size(),
 	}
@@ -873,6 +928,7 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 	requestedModel string,
 	excludedIDs map[int64]struct{},
 	requiredTransport OpenAIUpstreamTransport,
+	cacheAffinityKey ...string,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	decision := OpenAIAccountScheduleDecision{}
 	scheduler := s.getOpenAIAccountScheduler()
@@ -886,12 +942,18 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 
 	stickyAccountID, stickyRecovered, _ := s.resolveOpenAIWSStickyAccountIDForSession(ctx, groupID, sessionHash)
 
+	affinityKey := ""
+	if len(cacheAffinityKey) > 0 {
+		affinityKey = strings.TrimSpace(cacheAffinityKey[0])
+	}
+
 	selection, decision, err := scheduler.Select(ctx, OpenAIAccountScheduleRequest{
 		GroupID:            groupID,
 		SessionHash:        sessionHash,
 		StickyAccountID:    stickyAccountID,
 		PreviousResponseID: previousResponseID,
 		RequestedModel:     requestedModel,
+		CacheAffinityKey:   affinityKey,
 		RequiredTransport:  requiredTransport,
 		RequiredCohort:     requiredCohort,
 		ExcludedIDs:        excludedIDs,
@@ -979,28 +1041,31 @@ func (s *OpenAIGatewayService) openAIWSLBTopK() int {
 func (s *OpenAIGatewayService) openAIWSSchedulerWeights() GatewayOpenAIWSSchedulerScoreWeightsView {
 	if s != nil && s.cfg != nil {
 		return GatewayOpenAIWSSchedulerScoreWeightsView{
-			Priority:  s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Priority,
-			Load:      s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Load,
-			Queue:     s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue,
-			ErrorRate: s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate,
-			TTFT:      s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT,
+			Priority:      s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Priority,
+			Load:          s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Load,
+			Queue:         s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue,
+			ErrorRate:     s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate,
+			TTFT:          s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT,
+			CacheAffinity: s.cfg.Gateway.OpenAIWS.SchedulerScoreWeights.CacheAffinity,
 		}
 	}
 	return GatewayOpenAIWSSchedulerScoreWeightsView{
-		Priority:  1.0,
-		Load:      1.0,
-		Queue:     0.7,
-		ErrorRate: 0.8,
-		TTFT:      0.5,
+		Priority:      1.0,
+		Load:          1.0,
+		Queue:         0.7,
+		ErrorRate:     0.8,
+		TTFT:          0.5,
+		CacheAffinity: 1.3,
 	}
 }
 
 type GatewayOpenAIWSSchedulerScoreWeightsView struct {
-	Priority  float64
-	Load      float64
-	Queue     float64
-	ErrorRate float64
-	TTFT      float64
+	Priority      float64
+	Load          float64
+	Queue         float64
+	ErrorRate     float64
+	TTFT          float64
+	CacheAffinity float64
 }
 
 func clamp01(value float64) float64 {

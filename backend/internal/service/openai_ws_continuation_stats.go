@@ -15,8 +15,12 @@ type OpenAIWSContinuationStatsSnapshot struct {
 	PreviousResponseStrippedMidSessionTotal   int64
 	AccountSwitchWithCacheDropTotal           int64
 	StrongCohortFallbackTotal                 int64
+	CacheAffinitySelectionTotal               int64
 	DuplicateTurnRetryBlockedAfterEmitTotal   int64
 	EmittedBytesBeforeRetryTotal              int64
+	TurnReuseProcessingConflictTotal          int64
+	TurnReuseEmittedConflictTotal             int64
+	TurnReuseCompletedConflictTotal           int64
 	SessionStickyRebindFromLastResponseTotal  int64
 	PrevNotFoundAlignRetryTotal               int64
 	PrevNotFoundDropRetryTotal                int64
@@ -38,8 +42,12 @@ var (
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal   atomic.Int64
 	openAIWSContinuationAccountSwitchWithCacheDropTotal           atomic.Int64
 	openAIWSContinuationStrongCohortFallbackTotal                 atomic.Int64
+	openAIWSContinuationCacheAffinitySelectionTotal               atomic.Int64
 	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal   atomic.Int64
 	openAIWSContinuationEmittedBytesBeforeRetryTotal              atomic.Int64
+	openAIWSContinuationTurnReuseProcessingConflictTotal          atomic.Int64
+	openAIWSContinuationTurnReuseEmittedConflictTotal             atomic.Int64
+	openAIWSContinuationTurnReuseCompletedConflictTotal           atomic.Int64
 	openAIWSContinuationSessionStickyRebindFromLastResponseTotal  atomic.Int64
 	openAIWSContinuationPrevNotFoundAlignRetryTotal               atomic.Int64
 	openAIWSContinuationPrevNotFoundDropRetryTotal                atomic.Int64
@@ -62,8 +70,12 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 		PreviousResponseStrippedMidSessionTotal:   openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Load(),
 		AccountSwitchWithCacheDropTotal:           openAIWSContinuationAccountSwitchWithCacheDropTotal.Load(),
 		StrongCohortFallbackTotal:                 openAIWSContinuationStrongCohortFallbackTotal.Load(),
+		CacheAffinitySelectionTotal:               openAIWSContinuationCacheAffinitySelectionTotal.Load(),
 		DuplicateTurnRetryBlockedAfterEmitTotal:   openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Load(),
 		EmittedBytesBeforeRetryTotal:              openAIWSContinuationEmittedBytesBeforeRetryTotal.Load(),
+		TurnReuseProcessingConflictTotal:          openAIWSContinuationTurnReuseProcessingConflictTotal.Load(),
+		TurnReuseEmittedConflictTotal:             openAIWSContinuationTurnReuseEmittedConflictTotal.Load(),
+		TurnReuseCompletedConflictTotal:           openAIWSContinuationTurnReuseCompletedConflictTotal.Load(),
 		SessionStickyRebindFromLastResponseTotal:  openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Load(),
 		PrevNotFoundAlignRetryTotal:               openAIWSContinuationPrevNotFoundAlignRetryTotal.Load(),
 		PrevNotFoundDropRetryTotal:                openAIWSContinuationPrevNotFoundDropRetryTotal.Load(),
@@ -115,12 +127,27 @@ func RecordOpenAIWSContinuationStrongCohortFallback() {
 	openAIWSContinuationStrongCohortFallbackTotal.Add(1)
 }
 
+func RecordOpenAIWSContinuationCacheAffinitySelection() {
+	openAIWSContinuationCacheAffinitySelectionTotal.Add(1)
+}
+
 func RecordOpenAIWSContinuationDuplicateTurnRetryBlockedAfterEmit() {
 	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Add(1)
 }
 
 func RecordOpenAIWSContinuationEmittedBytesBeforeRetry() {
 	openAIWSContinuationEmittedBytesBeforeRetryTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationTurnReuseConflict(phase string) {
+	switch strings.TrimSpace(phase) {
+	case "emitted":
+		openAIWSContinuationTurnReuseEmittedConflictTotal.Add(1)
+	case "completed":
+		openAIWSContinuationTurnReuseCompletedConflictTotal.Add(1)
+	default:
+		openAIWSContinuationTurnReuseProcessingConflictTotal.Add(1)
+	}
 }
 
 func recordOpenAIWSContinuationSessionStickyRebindFromLastResponse() {
@@ -175,8 +202,12 @@ func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Store(0)
 	openAIWSContinuationAccountSwitchWithCacheDropTotal.Store(0)
 	openAIWSContinuationStrongCohortFallbackTotal.Store(0)
+	openAIWSContinuationCacheAffinitySelectionTotal.Store(0)
 	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Store(0)
 	openAIWSContinuationEmittedBytesBeforeRetryTotal.Store(0)
+	openAIWSContinuationTurnReuseProcessingConflictTotal.Store(0)
+	openAIWSContinuationTurnReuseEmittedConflictTotal.Store(0)
+	openAIWSContinuationTurnReuseCompletedConflictTotal.Store(0)
 	openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Store(0)
 	openAIWSContinuationPrevNotFoundAlignRetryTotal.Store(0)
 	openAIWSContinuationPrevNotFoundDropRetryTotal.Store(0)

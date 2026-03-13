@@ -14,6 +14,9 @@ const (
 	// ClientRequestID 客户端请求的唯一标识，用于追踪请求全生命周期（用于 Ops 监控与排障）。
 	ClientRequestID Key = "ctx_client_request_id"
 
+	// ClientRequestIDProvided 标识 ClientRequestID 是否由客户端显式提供，而不是网关回退生成。
+	ClientRequestIDProvided Key = "ctx_client_request_id_provided"
+
 	// Model 请求模型标识（用于统一请求链路日志字段）。
 	Model Key = "ctx_model"
 

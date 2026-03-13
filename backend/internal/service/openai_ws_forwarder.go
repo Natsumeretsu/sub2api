@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math/rand"
 	"net"
@@ -165,6 +166,28 @@ func openAIWSIngressTurnWroteDownstream(err error) bool {
 	return turnErr.wroteDownstream
 }
 
+func openAIWSIngressClientRequestID(ctx context.Context) string {
+	clientRequestID := ""
+	if ctx != nil {
+		if value, ok := ctx.Value(ctxkey.ClientRequestID).(string); ok {
+			clientRequestID = strings.TrimSpace(value)
+		}
+	}
+	if clientRequestID == "" {
+		clientRequestID = "unknown-client-request"
+	}
+	return clientRequestID
+}
+
+func openAIWSIngressClientRequestIDProvided(ctx context.Context) bool {
+	if ctx != nil {
+		if value, ok := ctx.Value(ctxkey.ClientRequestIDProvided).(bool); ok {
+			return value
+		}
+	}
+	return false
+}
+
 func openAIWSIngressTurnRetryReason(err error) string {
 	var turnErr *openAIWSIngressTurnError
 	if !errors.As(err, &turnErr) || turnErr == nil {
@@ -176,17 +199,26 @@ func openAIWSIngressTurnRetryReason(err error) string {
 	return turnErr.stage
 }
 
-func openAIWSIngressTurnKey(ctx context.Context, turn int) string {
-	clientRequestID := ""
-	if ctx != nil {
-		if value, ok := ctx.Value(ctxkey.ClientRequestID).(string); ok {
-			clientRequestID = strings.TrimSpace(value)
-		}
+func openAIWSIngressTurnKey(ctx context.Context, sessionHash string, turn int, payload []byte) string {
+	clientRequestID := openAIWSIngressClientRequestID(ctx)
+	provided := openAIWSIngressClientRequestIDProvided(ctx)
+	previousResponseID := strings.TrimSpace(openAIWSPayloadStringFromRaw(payload, "previous_response_id"))
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(strings.TrimSpace(sessionHash)))
+	_, _ = hasher.Write([]byte{0})
+	if !provided {
+		_, _ = hasher.Write([]byte(previousResponseID))
+		_, _ = hasher.Write([]byte{0})
 	}
-	if clientRequestID == "" {
-		clientRequestID = "unknown-client-request"
+	_, _ = hasher.Write([]byte(BuildOpenAIResponsesTurnPayloadFingerprint(payload)))
+	derived := strconv.FormatUint(hasher.Sum64(), 16)
+	if provided {
+		return "client:" + clientRequestID + ":" + derived
 	}
-	return clientRequestID + "#turn=" + strconv.Itoa(turn)
+	if strings.TrimSpace(sessionHash) != "" || previousResponseID != "" {
+		return "derived:" + derived
+	}
+	return "generated:" + clientRequestID + "#turn=" + strconv.Itoa(turn) + ":" + derived
 }
 
 func isOpenAIWSIngressPreviousResponseNotFound(err error) bool {
@@ -3241,6 +3273,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	turnPrevRecoveryTried := false
 	turnPrevRecoveryAllowFreshConn := false
 	turnSkipFunctionCallOutputPrevInfer := false
+	var currentTurnTicket *OpenAIResponsesTurnTicket
+	currentTurnStoredState := OpenAIResponsesTurnStoredState{
+		ClientRequestID: openAIWSIngressClientRequestID(ctx),
+		AccountID:       account.ID,
+		Cohort:          string(OpenAIContinuationCohortStrong),
+		Transport:       string(OpenAIUpstreamTransportResponsesWebsocketV2),
+	}
 	lastTurnFinishedAt := time.Time{}
 	lastTurnResponseID := ""
 	lastTurnPayload := []byte(nil)
@@ -3262,6 +3301,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		sessionConnID = ""
 		preferredConnID = ""
 	}
+	defer func() {
+		if currentTurnTicket == nil {
+			return
+		}
+		_ = s.MarkOpenAIResponsesTurnRetryable(ctx, currentTurnTicket, "OPENAI_WS_TURN_ABORTED_BEFORE_EMIT")
+	}()
 	recoverIngressPrevResponseNotFound := func(relayErr error, turn int, connID string) bool {
 		if !isOpenAIWSIngressPreviousResponseNotFound(relayErr) {
 			return false
@@ -3439,6 +3484,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 	retryIngressTurn := func(relayErr error, turn int, connID string) bool {
 		if openAIWSIngressTurnWroteDownstream(relayErr) {
+			if currentTurnTicket != nil {
+				_ = s.MarkOpenAIResponsesTurnEmitted(ctx, currentTurnTicket, currentTurnStoredState)
+				currentTurnTicket = nil
+			}
 			RecordOpenAIWSContinuationEmittedBytesBeforeRetry()
 			RecordOpenAIWSContinuationDuplicateTurnRetryBlockedAfterEmit()
 			logOpenAIWSModeInfo(
@@ -3446,7 +3495,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				account.ID,
 				turn,
 				truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
-				truncateOpenAIWSLogValue(openAIWSIngressTurnKey(ctx, turn), openAIWSHeaderValueMaxLen),
+				truncateOpenAIWSLogValue(openAIWSIngressTurnKey(ctx, sessionHash, turn, currentPayload), openAIWSHeaderValueMaxLen),
 				truncateOpenAIWSLogValue(openAIWSIngressTurnRetryReason(relayErr), openAIWSLogValueMaxLen),
 			)
 			return false
@@ -3483,6 +3532,40 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 		}
 		skipBeforeTurn = false
+		if currentTurnTicket == nil {
+			beginTicket, duplicateTurn, beginErr := s.BeginOpenAIResponsesTurn(
+				ctx,
+				groupID,
+				openAIWSIngressTurnKey(ctx, sessionHash, turn, currentPayload),
+				OpenAIResponsesTurnDescriptor{
+					SessionHash:        sessionHash,
+					PromptCacheKey:     strings.TrimSpace(openAIWSPayloadStringFromRaw(currentPayload, "prompt_cache_key")),
+					Model:              currentOriginalModel,
+					ClientRequestID:    openAIWSIngressClientRequestID(ctx),
+					RequestedTransport: string(OpenAIUpstreamTransportResponsesWebsocketV2),
+					RequestedCohort:    string(OpenAIContinuationCohortStrong),
+					PayloadFingerprint: BuildOpenAIResponsesTurnPayloadFingerprint(currentPayload),
+					Stream:             true,
+					TurnOrdinal:        turn,
+				},
+			)
+			if beginErr != nil {
+				return beginErr
+			}
+			if duplicateTurn != nil {
+				RecordOpenAIWSContinuationTurnReuseConflict(duplicateTurn.Phase)
+				statusCode := coderws.StatusPolicyViolation
+				message := "same websocket turn already completed; duplicate replay blocked"
+				if strings.TrimSpace(duplicateTurn.Phase) == string(OpenAIResponsesTurnPhaseProcessing) {
+					statusCode = coderws.StatusTryAgainLater
+					message = "same websocket turn is already processing; retry later with the same client_request_id"
+				} else if strings.TrimSpace(duplicateTurn.Phase) == string(OpenAIResponsesTurnPhaseEmitted) {
+					message = "same websocket turn already emitted downstream; duplicate replay blocked"
+				}
+				return NewOpenAIWSClientCloseError(statusCode, message, nil)
+			}
+			currentTurnTicket = beginTicket
+		}
 		currentPreviousResponseID := openAIWSPayloadStringFromRaw(currentPayload, "previous_response_id")
 		expectedPrev, expectedPrevFromSessionState := resolveOpenAIWSIngressExpectedPreviousResponseID(
 			stateStore,
@@ -3935,6 +4018,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		responseID := strings.TrimSpace(result.RequestID)
 		lastTurnResponseID = responseID
+		currentTurnStoredState.ResponseID = responseID
+		if currentTurnTicket != nil {
+			_ = s.MarkOpenAIResponsesTurnCompleted(ctx, currentTurnTicket, currentTurnStoredState)
+			currentTurnTicket = nil
+		}
 		lastTurnPayload = cloneOpenAIWSPayloadBytes(currentPayload)
 		lastTurnReplayInput = cloneOpenAIWSRawMessages(currentTurnReplayInput)
 		lastTurnReplayInputExists = currentTurnReplayInputExists
