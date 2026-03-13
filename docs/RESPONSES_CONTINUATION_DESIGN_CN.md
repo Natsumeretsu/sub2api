@@ -2,6 +2,8 @@
 
 本文档记录当前 fork 在 OpenAI Responses continuation 上的本地判断、外部交叉验证、用户体验优先的设计取舍，以及后续逐步落实路线。
 
+配套能力矩阵见：`docs/RESPONSES_CONTINUATION_CAPABILITY_MATRIX_CN.md`。
+
 适用范围：
 
 - `responses_websockets_v2`
@@ -21,7 +23,7 @@
 
 ### 1.1 已经补强到高完成度的部分
 
-当前 fork 的 9 个 hardening patch，已经把最危险的一段链路收紧到了较高完成度：
+当前 fork 已经落了一组连续 continuation hardening patch，已经把最危险的一段链路收紧到了较高完成度：
 
 - `WSv2 + store=false + function_call_output/tool 回合`
 - `previous_response_not_found`
