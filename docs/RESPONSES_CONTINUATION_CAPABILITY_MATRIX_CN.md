@@ -41,7 +41,7 @@
 | WSv2 `ctx_pool/passthrough` 普通 turn | `strong` | 默认保留；必要时可对齐或单次降级 | 文本 turn 可做受控恢复 | 本地 turn + 会话状态 + 连接提示 | 当前主承诺面 |
 | WSv2 `store=false` + `function_call_output` | `strong` | 优先对齐；必要时单次 fresh-conn 恢复 | 本地校验 -> 有锚点恢复 -> 自包含单次重试 -> 否则 fail-close | `last_response_id`、`turn_state`、连接亲和 | 当前 continuation hardening 主覆盖面；会话状态从共享缓存回填本地时会跟随共享剩余 TTL |
 | WSv2 `store=true` | `degraded-strong` | 允许依赖上游 history | 本地仍做基础校验，但更偏透传 | 上游 history + 本地辅助状态 | 语义更依赖上游 |
-| HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；但对强 continuation cohort，请求进入 handler 时会优先从共享会话状态回填 `previous_response_id`，并把账号选择收紧到 `WSv2` 能力面 | 以 handler 前置校验为主；强 cohort 会优先保链，弱会话仍可能 strip | 请求体 + 共享会话状态 + 上游 | 不承诺与 WSv2 等价，但不再把强会话静默打回弱 continuation |
+| HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；但对强 continuation cohort，请求进入 handler 时会优先从共享会话状态回填 `previous_response_id`，并显式输出请求/选中 cohort | 以 handler 前置校验为主；强 cohort 会优先保链，弱会话仍可能 strip；一旦已经向下游写出字节，不再静默重放同一 turn | 请求体 + 共享会话状态 + 上游 | 不承诺与 WSv2 等价，但不再把强会话静默打回弱 continuation，也不再对已出字节的 turn 做隐式账号切换重放 |
 | HTTP `/v1/responses/compact` | `degraded` | compact 单独规范化 | 不做 replay merge | compact 请求体 + 上游 | 不能假装与普通 `/responses` 完全等价 |
 | WSv1 / legacy websocket | `degraded` | 不在当前 hardening 主战场 | 不承诺与 WSv2 同等级恢复 | 旧状态面 | 仅保守兼容 |
 | 非原生 upstream / 跨协议变换 continuation | `unsupported-by-contract` | 不列入当前强承诺面 | 不在当前 10 patch 的 correctness 保证范围内 | 具体 adapter 自身 | 后续需单独 matrix |
@@ -89,6 +89,9 @@
   - `previous_response_recovered_from_session`
   - `previous_response_stripped_mid_session`
   - `account_switch_with_cache_drop`
+  - `strong_cohort_fallback`
+  - `duplicate_turn_retry_blocked_after_emit`
+  - `emitted_bytes_before_retry`
 - `previous_response_not_found`：
   - `align_previous_response_id`
   - `drop_previous_response_id`

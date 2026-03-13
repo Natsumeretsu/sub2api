@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -610,6 +611,59 @@ func TestSetOpenAIClientTransportWS(t *testing.T) {
 
 	setOpenAIClientTransportWS(c)
 	require.Equal(t, service.OpenAIClientTransportWS, service.GetOpenAIClientTransport(c))
+}
+
+func TestOpenAIResponsesTurnStarted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+
+	require.False(t, openAIResponsesTurnStarted(c, false))
+
+	_, _ = c.Writer.Write([]byte(`{"partial":true}`))
+	require.True(t, openAIResponsesTurnStarted(c, false))
+	require.True(t, openAIResponsesTurnStarted(c, true))
+}
+
+func TestOpenAIResponsesTurnKey_UsesClientRequestID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxkey.ClientRequestID, "creq-turn-1"))
+	c.Request = req
+
+	first := openAIResponsesTurnKey(c, "session_hash_1", "resp_prev_1")
+	second := openAIResponsesTurnKey(c, "session_hash_1", "resp_prev_1")
+	changed := openAIResponsesTurnKey(c, "session_hash_2", "resp_prev_1")
+
+	require.Equal(t, first, second)
+	require.NotEqual(t, first, changed)
+	require.True(t, strings.HasPrefix(first, "creq-turn-1:"))
+}
+
+func TestOpenAIHandleFailoverRetryBlockedAfterEmit_RecordsStatsWithoutOverwritingBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.ResetOpenAIWSContinuationStatsForTest()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+	_, _ = c.Writer.Write([]byte(`{"partial":true}`))
+
+	h := &OpenAIGatewayHandler{}
+	h.handleOpenAIFailoverRetryBlockedAfterEmit(c, nil, 101, "turn-key-1", &service.UpstreamFailoverError{
+		StatusCode:             http.StatusBadGateway,
+		RetryableOnSameAccount: true,
+	}, false)
+
+	stats := service.OpenAIWSContinuationStats()
+	require.Equal(t, int64(1), stats.DuplicateTurnRetryBlockedAfterEmitTotal)
+	require.Equal(t, int64(1), stats.EmittedBytesBeforeRetryTotal)
+	require.Equal(t, `{"partial":true}`, w.Body.String())
 }
 
 // TestOpenAIHandler_GjsonExtraction 验证 gjson 从请求体中提取 model/stream 的正确性

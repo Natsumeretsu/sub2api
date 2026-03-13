@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -239,6 +241,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	requiredTransport := service.ResolveOpenAIWSRequiredTransportForAnchor(anchor)
+	turnKey := openAIResponsesTurnKey(c, sessionHash, previousResponseID)
 
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -292,11 +295,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.String("layer", scheduleDecision.Layer),
 			zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
 			zap.Bool("sticky_session_hit", scheduleDecision.StickySessionHit),
+			zap.String("requested_cohort", scheduleDecision.RequestedCohort),
+			zap.String("selected_cohort", scheduleDecision.SelectedCohort),
+			zap.Bool("cohort_fallback", scheduleDecision.CohortFallback),
 			zap.Int("candidate_count", scheduleDecision.CandidateCount),
 			zap.Int("top_k", scheduleDecision.TopK),
 			zap.Int64("latency_ms", scheduleDecision.LatencyMs),
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
+		if scheduleDecision.CohortFallback && scheduleDecision.RequestedCohort == string(service.OpenAIContinuationCohortStrong) {
+			service.RecordOpenAIWSContinuationStrongCohortFallback()
+		}
 		account := selection.Account
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
@@ -328,6 +337,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+				if openAIResponsesTurnStarted(c, streamStarted) {
+					h.handleOpenAIFailoverRetryBlockedAfterEmit(c, reqLog, account.ID, turnKey, failoverErr, streamStarted)
+					return
+				}
 				// 池模式：同账号重试
 				if failoverErr.RetryableOnSameAccount {
 					retryLimit := account.GetPoolModeRetryCount()
@@ -1533,6 +1546,58 @@ func shouldLogOpenAIForwardFailureAsWarn(c *gin.Context, wroteFallback bool) boo
 		return false
 	}
 	return c.Writer.Written()
+}
+
+func openAIResponsesTurnStarted(c *gin.Context, streamStarted bool) bool {
+	if streamStarted {
+		return true
+	}
+	if c == nil || c.Writer == nil {
+		return false
+	}
+	return c.Writer.Written()
+}
+
+func openAIResponsesTurnKey(c *gin.Context, sessionHash string, previousResponseID string) string {
+	clientRequestID := ""
+	if c != nil && c.Request != nil {
+		if value, ok := c.Request.Context().Value(ctxkey.ClientRequestID).(string); ok {
+			clientRequestID = strings.TrimSpace(value)
+		}
+	}
+	if clientRequestID == "" {
+		clientRequestID = "unknown-client-request"
+	}
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(strings.TrimSpace(sessionHash)))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(strings.TrimSpace(previousResponseID)))
+	return clientRequestID + ":" + strconv.FormatUint(hasher.Sum64(), 16)
+}
+
+func (h *OpenAIGatewayHandler) handleOpenAIFailoverRetryBlockedAfterEmit(
+	c *gin.Context,
+	reqLog *zap.Logger,
+	accountID int64,
+	turnKey string,
+	failoverErr *service.UpstreamFailoverError,
+	streamStarted bool,
+) {
+	service.RecordOpenAIWSContinuationEmittedBytesBeforeRetry()
+	service.RecordOpenAIWSContinuationDuplicateTurnRetryBlockedAfterEmit()
+	if reqLog != nil {
+		reqLog.Warn("openai.turn_retry_blocked_after_emit",
+			zap.String("turn_key", turnKey),
+			zap.Int64("account_id", accountID),
+			zap.Int("upstream_status", failoverErr.StatusCode),
+			zap.Bool("stream_started", streamStarted),
+			zap.Bool("writer_written", c != nil && c.Writer != nil && c.Writer.Written()),
+			zap.Bool("retryable_same_account", failoverErr.RetryableOnSameAccount),
+		)
+	}
+	if streamStarted {
+		h.handleFailoverExhausted(c, failoverErr, true)
+	}
 }
 
 // errorResponse returns OpenAI API format error response

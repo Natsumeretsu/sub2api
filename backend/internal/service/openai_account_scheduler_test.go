@@ -957,6 +957,95 @@ func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *
 	require.True(t, scheduler.isAccountTransportCompatible(account, OpenAIUpstreamTransportResponsesWebsocketV2))
 }
 
+func TestDefaultOpenAIAccountScheduler_Select_PrefersStrongCohortBeforeDegraded(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(8802)
+	cfg := newOpenAIWSV2TestConfig()
+	strong := Account{
+		ID:          88021,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+		Extra: map[string]any{
+			"openai_apikey_responses_websockets_v2_enabled": true,
+		},
+	}
+	degraded := Account{
+		ID:          88022,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{strong, degraded}},
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	scheduler := &defaultOpenAIAccountScheduler{service: svc, stats: newOpenAIAccountRuntimeStats()}
+
+	selection, decision, err := scheduler.Select(ctx, OpenAIAccountScheduleRequest{
+		GroupID:           &groupID,
+		RequestedModel:    "gpt-5.1",
+		RequiredTransport: OpenAIUpstreamTransportAny,
+		RequiredCohort:    OpenAIContinuationCohortStrong,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, strong.ID, selection.Account.ID)
+	require.Equal(t, string(OpenAIContinuationCohortStrong), decision.RequestedCohort)
+	require.Equal(t, string(OpenAIContinuationCohortStrong), decision.SelectedCohort)
+	require.False(t, decision.CohortFallback)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestDefaultOpenAIAccountScheduler_Select_FallsBackToDegradedCohortWhenStrongUnavailable(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(8803)
+	degraded := Account{
+		ID:          88031,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{degraded}},
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	scheduler := &defaultOpenAIAccountScheduler{service: svc, stats: newOpenAIAccountRuntimeStats()}
+
+	selection, decision, err := scheduler.Select(ctx, OpenAIAccountScheduleRequest{
+		GroupID:           &groupID,
+		RequestedModel:    "gpt-5.1",
+		RequiredTransport: OpenAIUpstreamTransportAny,
+		RequiredCohort:    OpenAIContinuationCohortStrong,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, degraded.ID, selection.Account.ID)
+	require.Equal(t, string(OpenAIContinuationCohortStrong), decision.RequestedCohort)
+	require.Equal(t, string(OpenAIContinuationCohortDegraded), decision.SelectedCohort)
+	require.True(t, decision.CohortFallback)
+	metrics := scheduler.SnapshotMetrics()
+	require.Equal(t, int64(1), metrics.CohortFallbackTotal)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func int64PtrForTest(v int64) *int64 {
 	return &v
 }

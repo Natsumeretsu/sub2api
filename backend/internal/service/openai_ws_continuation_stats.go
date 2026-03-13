@@ -14,6 +14,9 @@ type OpenAIWSContinuationStatsSnapshot struct {
 	PreviousResponseRecoveredFromSessionTotal int64
 	PreviousResponseStrippedMidSessionTotal   int64
 	AccountSwitchWithCacheDropTotal           int64
+	StrongCohortFallbackTotal                 int64
+	DuplicateTurnRetryBlockedAfterEmitTotal   int64
+	EmittedBytesBeforeRetryTotal              int64
 	SessionStickyRebindFromLastResponseTotal  int64
 	PrevNotFoundAlignRetryTotal               int64
 	PrevNotFoundDropRetryTotal                int64
@@ -34,6 +37,9 @@ var (
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal atomic.Int64
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal   atomic.Int64
 	openAIWSContinuationAccountSwitchWithCacheDropTotal           atomic.Int64
+	openAIWSContinuationStrongCohortFallbackTotal                 atomic.Int64
+	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal   atomic.Int64
+	openAIWSContinuationEmittedBytesBeforeRetryTotal              atomic.Int64
 	openAIWSContinuationSessionStickyRebindFromLastResponseTotal  atomic.Int64
 	openAIWSContinuationPrevNotFoundAlignRetryTotal               atomic.Int64
 	openAIWSContinuationPrevNotFoundDropRetryTotal                atomic.Int64
@@ -55,6 +61,9 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 		PreviousResponseRecoveredFromSessionTotal: openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Load(),
 		PreviousResponseStrippedMidSessionTotal:   openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Load(),
 		AccountSwitchWithCacheDropTotal:           openAIWSContinuationAccountSwitchWithCacheDropTotal.Load(),
+		StrongCohortFallbackTotal:                 openAIWSContinuationStrongCohortFallbackTotal.Load(),
+		DuplicateTurnRetryBlockedAfterEmitTotal:   openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Load(),
+		EmittedBytesBeforeRetryTotal:              openAIWSContinuationEmittedBytesBeforeRetryTotal.Load(),
 		SessionStickyRebindFromLastResponseTotal:  openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Load(),
 		PrevNotFoundAlignRetryTotal:               openAIWSContinuationPrevNotFoundAlignRetryTotal.Load(),
 		PrevNotFoundDropRetryTotal:                openAIWSContinuationPrevNotFoundDropRetryTotal.Load(),
@@ -100,6 +109,18 @@ func RecordOpenAIWSContinuationPreviousResponseStrippedMidSession() {
 
 func RecordOpenAIWSContinuationAccountSwitchWithCacheDrop() {
 	openAIWSContinuationAccountSwitchWithCacheDropTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationStrongCohortFallback() {
+	openAIWSContinuationStrongCohortFallbackTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationDuplicateTurnRetryBlockedAfterEmit() {
+	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationEmittedBytesBeforeRetry() {
+	openAIWSContinuationEmittedBytesBeforeRetryTotal.Add(1)
 }
 
 func recordOpenAIWSContinuationSessionStickyRebindFromLastResponse() {
@@ -153,6 +174,9 @@ func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Store(0)
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Store(0)
 	openAIWSContinuationAccountSwitchWithCacheDropTotal.Store(0)
+	openAIWSContinuationStrongCohortFallbackTotal.Store(0)
+	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Store(0)
+	openAIWSContinuationEmittedBytesBeforeRetryTotal.Store(0)
 	openAIWSContinuationSessionStickyRebindFromLastResponseTotal.Store(0)
 	openAIWSContinuationPrevNotFoundAlignRetryTotal.Store(0)
 	openAIWSContinuationPrevNotFoundDropRetryTotal.Store(0)
@@ -164,4 +188,9 @@ func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationPreflightPingDropSelfContainedRetryTotal.Store(0)
 	openAIWSContinuationPreflightPingFailClosedMissingAnchorTotal.Store(0)
 	openAIWSContinuationPreflightPingFailClosedStaleAnchorTotal.Store(0)
+}
+
+// ResetOpenAIWSContinuationStatsForTest 重置 continuation 统计，供跨包测试复位使用。
+func ResetOpenAIWSContinuationStatsForTest() {
+	resetOpenAIWSContinuationStatsForTest()
 }

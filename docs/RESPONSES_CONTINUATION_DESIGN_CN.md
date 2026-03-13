@@ -173,6 +173,9 @@ OpenAI 官方文档指向两个核心事实：
 - HTTP 中途降级进入 `Responses(...)` 时，如果会话仍属于强 continuation cohort，则在账号选择前优先从共享会话状态回填 `previous_response_id`，并把 `requiredTransport` 收紧到 `WSv2`
 - 对强 continuation cohort 的 HTTP 中途降级，不再默认静默剥离 `previous_response_id`；只有弱会话或明确不满足 cohort 条件时才继续走旧的 strip 行为
 - `client_request_id` 中间件现在优先接受客户端显式传入的 `X-Client-Request-ID` / `Client-Request-ID`，再退回本地生成 UUID，作为后续 turn 级幂等键的最小基础
+- `/responses` handler 在已有下游输出后，不再对同一 turn 做同账号或跨账号静默重试；如果 streaming 已开始，只补一个明确的终止错误，而不是重新生成第二份回答
+- WS ingress turn 在 `wroteDownstream=true` 时，会显式阻断本轮重试，并记录对应的 duplicate-turn / emitted-bytes 计数
+- 调度器已显式区分 `continuation cohort / degraded cohort`，并把请求 cohort、选中 cohort 与 cohort fallback 作为决策字段输出，避免“只看 transport 看不见语义层级”
 
 ### 4.2 暂不实施
 
@@ -197,6 +200,9 @@ OpenAI 官方文档指向两个核心事实：
   - `previous_response_recovered_from_session_total`
   - `previous_response_id_stripped_mid_session_total`
   - `account_switch_with_cache_drop_total`
+  - `strong_cohort_fallback_total`
+  - `duplicate_turn_retry_blocked_after_emit_total`
+  - `emitted_bytes_before_retry_total`
   - fail-close 原因
   - stale anchor 对齐次数
   - self-contained retry 次数

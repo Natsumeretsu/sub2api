@@ -20,6 +20,13 @@ const (
 	openAIAccountScheduleLayerLoadBalance      = "load_balance"
 )
 
+type OpenAIContinuationCohort string
+
+const (
+	OpenAIContinuationCohortStrong   OpenAIContinuationCohort = "strong"
+	OpenAIContinuationCohortDegraded OpenAIContinuationCohort = "degraded"
+)
+
 type OpenAIAccountScheduleRequest struct {
 	GroupID            *int64
 	SessionHash        string
@@ -27,6 +34,7 @@ type OpenAIAccountScheduleRequest struct {
 	PreviousResponseID string
 	RequestedModel     string
 	RequiredTransport  OpenAIUpstreamTransport
+	RequiredCohort     OpenAIContinuationCohort
 	ExcludedIDs        map[int64]struct{}
 }
 
@@ -34,6 +42,9 @@ type OpenAIAccountScheduleDecision struct {
 	Layer               string
 	StickyPreviousHit   bool
 	StickySessionHit    bool
+	RequestedCohort     string
+	SelectedCohort      string
+	CohortFallback      bool
 	CandidateCount      int
 	TopK                int
 	LatencyMs           int64
@@ -48,6 +59,7 @@ type OpenAIAccountSchedulerMetricsSnapshot struct {
 	StickySessionHitTotal    int64
 	LoadBalanceSelectTotal   int64
 	AccountSwitchTotal       int64
+	CohortFallbackTotal      int64
 	SchedulerLatencyMsTotal  int64
 	SchedulerLatencyMsAvg    float64
 	StickyHitRatio           float64
@@ -69,6 +81,7 @@ type openAIAccountSchedulerMetrics struct {
 	stickySessionHitTotal  atomic.Int64
 	loadBalanceSelectTotal atomic.Int64
 	accountSwitchTotal     atomic.Int64
+	cohortFallbackTotal    atomic.Int64
 	latencyMsTotal         atomic.Int64
 	loadSkewMilliTotal     atomic.Int64
 }
@@ -88,6 +101,9 @@ func (m *openAIAccountSchedulerMetrics) recordSelect(decision OpenAIAccountSched
 	}
 	if decision.Layer == openAIAccountScheduleLayerLoadBalance {
 		m.loadBalanceSelectTotal.Add(1)
+	}
+	if decision.CohortFallback {
+		m.cohortFallbackTotal.Add(1)
 	}
 }
 
@@ -226,6 +242,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	req OpenAIAccountScheduleRequest,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	decision := OpenAIAccountScheduleDecision{}
+	req.RequiredCohort = normalizeOpenAIRequiredCohort(req.RequiredCohort, req.RequiredTransport)
+	decision.RequestedCohort = string(req.RequiredCohort)
 	start := time.Now()
 	defer func() {
 		decision.LatencyMs = time.Since(start).Milliseconds()
@@ -254,6 +272,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			decision.StickyPreviousHit = true
 			decision.SelectedAccountID = selection.Account.ID
 			decision.SelectedAccountType = selection.Account.Type
+			decision.SelectedCohort = string(s.resolveAccountContinuationCohort(selection.Account))
 			if req.SessionHash != "" {
 				_ = s.service.BindStickySession(ctx, req.GroupID, req.SessionHash, selection.Account.ID)
 			}
@@ -270,20 +289,23 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		decision.StickySessionHit = true
 		decision.SelectedAccountID = selection.Account.ID
 		decision.SelectedAccountType = selection.Account.Type
+		decision.SelectedCohort = string(s.resolveAccountContinuationCohort(selection.Account))
 		return selection, decision, nil
 	}
 
-	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req)
+	selection, candidateCount, topK, loadSkew, cohortFallback, err := s.selectByLoadBalance(ctx, req)
 	decision.Layer = openAIAccountScheduleLayerLoadBalance
 	decision.CandidateCount = candidateCount
 	decision.TopK = topK
 	decision.LoadSkew = loadSkew
+	decision.CohortFallback = cohortFallback
 	if err != nil {
 		return nil, decision, err
 	}
 	if selection != nil && selection.Account != nil {
 		decision.SelectedAccountID = selection.Account.ID
 		decision.SelectedAccountType = selection.Account.Type
+		decision.SelectedCohort = string(s.resolveAccountContinuationCohort(selection.Account))
 	}
 	return selection, decision, nil
 }
@@ -561,17 +583,18 @@ func buildOpenAIWeightedSelectionOrder(
 func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
-) (*AccountSelectionResult, int, int, float64, error) {
+) (*AccountSelectionResult, int, int, float64, bool, error) {
 	accounts, err := s.service.listSchedulableAccounts(ctx, req.GroupID)
 	if err != nil {
-		return nil, 0, 0, 0, err
+		return nil, 0, 0, 0, false, err
 	}
 	if len(accounts) == 0 {
-		return nil, 0, 0, 0, errors.New("no available OpenAI accounts")
+		return nil, 0, 0, 0, false, errors.New("no available OpenAI accounts")
 	}
 
 	filtered := make([]*Account, 0, len(accounts))
 	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
+	requiredCohort := normalizeOpenAIRequiredCohort(req.RequiredCohort, req.RequiredTransport)
 	for i := range accounts {
 		account := &accounts[i]
 		if req.ExcludedIDs != nil {
@@ -595,7 +618,26 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		})
 	}
 	if len(filtered) == 0 {
-		return nil, 0, 0, 0, errors.New("no available OpenAI accounts")
+		return nil, 0, 0, 0, false, errors.New("no available OpenAI accounts")
+	}
+
+	cohortFallback := false
+	if requiredCohort != "" {
+		cohortFiltered := make([]*Account, 0, len(filtered))
+		cohortLoadReq := make([]AccountWithConcurrency, 0, len(loadReq))
+		for i, account := range filtered {
+			if s.resolveAccountContinuationCohort(account) != requiredCohort {
+				continue
+			}
+			cohortFiltered = append(cohortFiltered, account)
+			cohortLoadReq = append(cohortLoadReq, loadReq[i])
+		}
+		if len(cohortFiltered) > 0 {
+			filtered = cohortFiltered
+			loadReq = cohortLoadReq
+		} else {
+			cohortFallback = true
+		}
 	}
 
 	loadMap := map[int64]*AccountLoadInfo{}
@@ -674,6 +716,9 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			weights.ErrorRate*errorFactor +
 			weights.TTFT*ttftFactor
 	}
+	if len(candidates) == 0 {
+		return nil, 0, 0, 0, cohortFallback, errors.New("no available OpenAI accounts")
+	}
 
 	topK := s.service.openAIWSLBTopK()
 	if topK > len(candidates) {
@@ -693,7 +738,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
 		if acquireErr != nil {
-			return nil, len(candidates), topK, loadSkew, acquireErr
+			return nil, len(candidates), topK, loadSkew, cohortFallback, acquireErr
 		}
 		if result != nil && result.Acquired {
 			if req.SessionHash != "" {
@@ -703,7 +748,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 				Account:     fresh,
 				Acquired:    true,
 				ReleaseFunc: result.ReleaseFunc,
-			}, len(candidates), topK, loadSkew, nil
+			}, len(candidates), topK, loadSkew, cohortFallback, nil
 		}
 	}
 
@@ -722,10 +767,10 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 				Timeout:        cfg.FallbackWaitTimeout,
 				MaxWaiting:     cfg.FallbackMaxWaiting,
 			},
-		}, len(candidates), topK, loadSkew, nil
+		}, len(candidates), topK, loadSkew, cohortFallback, nil
 	}
 
-	return nil, len(candidates), topK, loadSkew, errors.New("no available accounts")
+	return nil, len(candidates), topK, loadSkew, cohortFallback, errors.New("no available accounts")
 }
 
 func (s *defaultOpenAIAccountScheduler) isAccountTransportCompatible(account *Account, requiredTransport OpenAIUpstreamTransport) bool {
@@ -737,6 +782,27 @@ func (s *defaultOpenAIAccountScheduler) isAccountTransportCompatible(account *Ac
 		return false
 	}
 	return s.service.getOpenAIWSProtocolResolver().Resolve(account).Transport == requiredTransport
+}
+
+func normalizeOpenAIRequiredCohort(requiredCohort OpenAIContinuationCohort, requiredTransport OpenAIUpstreamTransport) OpenAIContinuationCohort {
+	switch requiredCohort {
+	case OpenAIContinuationCohortStrong, OpenAIContinuationCohortDegraded:
+		return requiredCohort
+	}
+	if requiredTransport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		return OpenAIContinuationCohortStrong
+	}
+	return OpenAIContinuationCohortDegraded
+}
+
+func (s *defaultOpenAIAccountScheduler) resolveAccountContinuationCohort(account *Account) OpenAIContinuationCohort {
+	if s == nil || s.service == nil || account == nil {
+		return OpenAIContinuationCohortDegraded
+	}
+	if s.service.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		return OpenAIContinuationCohortStrong
+	}
+	return OpenAIContinuationCohortDegraded
 }
 
 func (s *defaultOpenAIAccountScheduler) ReportResult(accountID int64, success bool, firstTokenMs *int) {
@@ -771,6 +837,7 @@ func (s *defaultOpenAIAccountScheduler) SnapshotMetrics() OpenAIAccountScheduler
 		StickySessionHitTotal:    sessionHit,
 		LoadBalanceSelectTotal:   s.metrics.loadBalanceSelectTotal.Load(),
 		AccountSwitchTotal:       switchTotal,
+		CohortFallbackTotal:      s.metrics.cohortFallbackTotal.Load(),
 		SchedulerLatencyMsTotal:  latencyTotal,
 		RuntimeStatsAccountCount: s.stats.size(),
 	}
@@ -809,9 +876,11 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	decision := OpenAIAccountScheduleDecision{}
 	scheduler := s.getOpenAIAccountScheduler()
+	requiredCohort := normalizeOpenAIRequiredCohort("", requiredTransport)
 	if scheduler == nil {
 		selection, err := s.SelectAccountWithLoadAwareness(ctx, groupID, sessionHash, requestedModel, excludedIDs)
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
+		decision.RequestedCohort = string(requiredCohort)
 		return selection, decision, err
 	}
 
@@ -824,6 +893,7 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 		PreviousResponseID: previousResponseID,
 		RequestedModel:     requestedModel,
 		RequiredTransport:  requiredTransport,
+		RequiredCohort:     requiredCohort,
 		ExcludedIDs:        excludedIDs,
 	})
 	s.rebindRecoveredOpenAIWSStickyAccount(ctx, groupID, sessionHash, stickyAccountID, stickyRecovered, selection)

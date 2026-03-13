@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -155,6 +157,14 @@ func isOpenAIWSIngressTurnRetryable(err error) bool {
 	}
 }
 
+func openAIWSIngressTurnWroteDownstream(err error) bool {
+	var turnErr *openAIWSIngressTurnError
+	if !errors.As(err, &turnErr) || turnErr == nil {
+		return false
+	}
+	return turnErr.wroteDownstream
+}
+
 func openAIWSIngressTurnRetryReason(err error) string {
 	var turnErr *openAIWSIngressTurnError
 	if !errors.As(err, &turnErr) || turnErr == nil {
@@ -164,6 +174,19 @@ func openAIWSIngressTurnRetryReason(err error) string {
 		return "unknown"
 	}
 	return turnErr.stage
+}
+
+func openAIWSIngressTurnKey(ctx context.Context, turn int) string {
+	clientRequestID := ""
+	if ctx != nil {
+		if value, ok := ctx.Value(ctxkey.ClientRequestID).(string); ok {
+			clientRequestID = strings.TrimSpace(value)
+		}
+	}
+	if clientRequestID == "" {
+		clientRequestID = "unknown-client-request"
+	}
+	return clientRequestID + "#turn=" + strconv.Itoa(turn)
 }
 
 func isOpenAIWSIngressPreviousResponseNotFound(err error) bool {
@@ -3415,6 +3438,19 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return true
 	}
 	retryIngressTurn := func(relayErr error, turn int, connID string) bool {
+		if openAIWSIngressTurnWroteDownstream(relayErr) {
+			RecordOpenAIWSContinuationEmittedBytesBeforeRetry()
+			RecordOpenAIWSContinuationDuplicateTurnRetryBlockedAfterEmit()
+			logOpenAIWSModeInfo(
+				"ingress_ws_turn_retry_blocked_after_emit account_id=%d turn=%d conn_id=%s turn_key=%s reason=%s",
+				account.ID,
+				turn,
+				truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
+				truncateOpenAIWSLogValue(openAIWSIngressTurnKey(ctx, turn), openAIWSHeaderValueMaxLen),
+				truncateOpenAIWSLogValue(openAIWSIngressTurnRetryReason(relayErr), openAIWSLogValueMaxLen),
+			)
+			return false
+		}
 		if !isOpenAIWSIngressTurnRetryable(relayErr) || turnRetry >= 1 {
 			return false
 		}
