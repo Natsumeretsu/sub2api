@@ -148,6 +148,29 @@ type ContinuationSummaryItem = {
   tone: 'neutral' | 'info' | 'success' | 'warning'
 }
 
+type ContinuationDiagnosisRule = {
+  key: string
+  label: string
+  threshold: string
+  observed: string
+  action: string
+  tone: 'neutral' | 'info' | 'success' | 'warning'
+  hit: boolean
+}
+
+const CONTINUATION_RULE_THRESHOLDS = {
+  validationRejectWarn: 1,
+  validationRejectEscalate: 3,
+  failCloseWarn: 1,
+  recoveryNotice: 1,
+  recoveryWarn: 5,
+  selfContainedNotice: 1,
+  persistenceWarnMinCount: 2,
+  saturationInfoPercent: 50,
+  saturationWarnPercent: 80,
+  connChurnWarn: 10
+} as const
+
 function boolLabel(value: boolean | null | undefined): string {
   return value ? t('common.enabled') : t('common.disabled')
 }
@@ -386,12 +409,11 @@ const continuationStateLimitItems = computed<ContinuationDisplayItem[]>(() => {
   ]
 })
 
-const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
+const continuationDerivedStats = computed(() => {
   const snapshot = continuationSnapshot.value
-  if (!snapshot) return []
+  if (!snapshot) return null
 
   const counters = snapshot.counters
-  const config = snapshot.config
   const state = snapshot.state
 
   const validationRejects =
@@ -410,14 +432,11 @@ const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
   const selfContainedRecoveries =
     counters.prev_not_found_drop_self_contained_retry_total +
     counters.preflight_ping_drop_self_contained_retry_total
-
   const persistentCount = [
     state.response_account_persistent,
     state.session_turn_state_persistent,
     state.session_last_response_persistent
   ].filter(Boolean).length
-  const persistencePercent = (persistentCount / 3) * 100
-
   const maxEntries = Math.max(
     state.response_account_local_entries,
     state.response_conn_entries,
@@ -428,6 +447,27 @@ const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
   )
   const saturationPercent =
     state.local_max_entries_per_map > 0 ? (maxEntries / state.local_max_entries_per_map) * 100 : 0
+  const connDeleteCount = state.response_conn_delete_total + state.session_conn_delete_total
+
+  return {
+    validationRejects,
+    failClosed,
+    recoveries,
+    selfContainedRecoveries,
+    persistentCount,
+    maxEntries,
+    saturationPercent,
+    connDeleteCount
+  }
+})
+
+const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
+  const snapshot = continuationSnapshot.value
+  const derived = continuationDerivedStats.value
+  if (!snapshot || !derived) return []
+
+  const config = snapshot.config
+  const persistencePercent = (derived.persistentCount / 3) * 100
 
   let postureValue = t('admin.ops.runtime.continuation.summary.posture.healthy')
   let postureDesc = t('admin.ops.runtime.continuation.summary.postureHealthyDesc')
@@ -441,11 +481,14 @@ const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
     postureValue = t('admin.ops.runtime.continuation.summary.posture.degraded')
     postureDesc = t('admin.ops.runtime.continuation.summary.postureDegradedDesc')
     postureTone = 'warning'
-  } else if (failClosed > 0 || validationRejects > 0) {
+  } else if (
+    derived.failClosed >= CONTINUATION_RULE_THRESHOLDS.failCloseWarn ||
+    derived.validationRejects >= CONTINUATION_RULE_THRESHOLDS.validationRejectWarn
+  ) {
     postureValue = t('admin.ops.runtime.continuation.summary.posture.attention')
     postureDesc = t('admin.ops.runtime.continuation.summary.postureAttentionDesc')
     postureTone = 'warning'
-  } else if (recoveries > 0) {
+  } else if (derived.recoveries >= CONTINUATION_RULE_THRESHOLDS.recoveryNotice) {
     postureValue = t('admin.ops.runtime.continuation.summary.posture.recovering')
     postureDesc = t('admin.ops.runtime.continuation.summary.postureRecoveringDesc')
     postureTone = 'info'
@@ -454,24 +497,28 @@ const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
   let experienceValue = t('admin.ops.runtime.continuation.summary.experience.stable')
   let experienceDesc = t('admin.ops.runtime.continuation.summary.experienceStableDesc')
   let experienceTone: ContinuationSummaryItem['tone'] = 'success'
-  if (failClosed > 0) {
+  if (derived.failClosed >= CONTINUATION_RULE_THRESHOLDS.failCloseWarn) {
     experienceValue = t('admin.ops.runtime.continuation.summary.experience.failClose')
-    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceFailCloseDesc', { count: failClosed })
+    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceFailCloseDesc', { count: derived.failClosed })
     experienceTone = 'warning'
-  } else if (selfContainedRecoveries > 0) {
+  } else if (derived.selfContainedRecoveries >= CONTINUATION_RULE_THRESHOLDS.selfContainedNotice) {
     experienceValue = t('admin.ops.runtime.continuation.summary.experience.selfContained')
-    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceSelfContainedDesc', { count: selfContainedRecoveries })
+    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceSelfContainedDesc', { count: derived.selfContainedRecoveries })
     experienceTone = 'success'
-  } else if (recoveries > 0) {
+  } else if (derived.recoveries >= CONTINUATION_RULE_THRESHOLDS.recoveryNotice) {
     experienceValue = t('admin.ops.runtime.continuation.summary.experience.recovered')
-    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceRecoveredDesc', { count: recoveries })
+    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceRecoveredDesc', { count: derived.recoveries })
     experienceTone = 'info'
   }
 
   const persistenceTone: ContinuationSummaryItem['tone'] =
-    persistentCount === 3 ? 'success' : persistentCount >= 1 ? 'info' : 'warning'
+    derived.persistentCount === 3 ? 'success' : derived.persistentCount >= CONTINUATION_RULE_THRESHOLDS.persistenceWarnMinCount ? 'info' : 'warning'
   const saturationTone: ContinuationSummaryItem['tone'] =
-    saturationPercent >= 80 ? 'warning' : saturationPercent >= 50 ? 'info' : 'success'
+    derived.saturationPercent >= CONTINUATION_RULE_THRESHOLDS.saturationWarnPercent
+      ? 'warning'
+      : derived.saturationPercent >= CONTINUATION_RULE_THRESHOLDS.saturationInfoPercent
+        ? 'info'
+        : 'success'
 
   return [
     {
@@ -491,30 +538,130 @@ const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
     {
       key: 'persistence',
       label: t('admin.ops.runtime.continuation.summary.labels.persistence'),
-      value: `${persistentCount}/3 (${formatPercent(persistencePercent)})`,
-      description: t('admin.ops.runtime.continuation.summary.persistenceDesc', { count: persistentCount }),
+      value: `${derived.persistentCount}/3 (${formatPercent(persistencePercent)})`,
+      description: t('admin.ops.runtime.continuation.summary.persistenceDesc', { count: derived.persistentCount }),
       tone: persistenceTone
     },
     {
       key: 'saturation',
       label: t('admin.ops.runtime.continuation.summary.labels.saturation'),
-      value: formatPercent(saturationPercent),
+      value: formatPercent(derived.saturationPercent),
       description: t('admin.ops.runtime.continuation.summary.saturationDesc', {
-        entries: maxEntries,
-        limit: state.local_max_entries_per_map
+        entries: derived.maxEntries,
+        limit: snapshot.state.local_max_entries_per_map
       }),
       tone: saturationTone
     }
   ]
 })
 
+const continuationDiagnosisRules = computed<ContinuationDiagnosisRule[]>(() => {
+  const snapshot = continuationSnapshot.value
+  const derived = continuationDerivedStats.value
+  if (!snapshot || !derived) return []
+
+  const rules: ContinuationDiagnosisRule[] = [
+    {
+      key: 'validation',
+      label: t('admin.ops.runtime.continuation.rules.validation'),
+      threshold: t('admin.ops.runtime.continuation.rules.thresholdAtLeast', {
+        count: CONTINUATION_RULE_THRESHOLDS.validationRejectWarn
+      }),
+      observed: formatCount(derived.validationRejects),
+      action: t('admin.ops.runtime.continuation.actions.clientPayload'),
+      tone:
+        derived.validationRejects >= CONTINUATION_RULE_THRESHOLDS.validationRejectEscalate
+          ? 'warning'
+          : derived.validationRejects >= CONTINUATION_RULE_THRESHOLDS.validationRejectWarn
+            ? 'info'
+            : 'neutral',
+      hit: derived.validationRejects >= CONTINUATION_RULE_THRESHOLDS.validationRejectWarn
+    },
+    {
+      key: 'fail_close',
+      label: t('admin.ops.runtime.continuation.rules.failClose'),
+      threshold: t('admin.ops.runtime.continuation.rules.thresholdAtLeast', {
+        count: CONTINUATION_RULE_THRESHOLDS.failCloseWarn
+      }),
+      observed: formatCount(derived.failClosed),
+      action: t('admin.ops.runtime.continuation.actions.localAnchor'),
+      tone: derived.failClosed >= CONTINUATION_RULE_THRESHOLDS.failCloseWarn ? 'warning' : 'neutral',
+      hit: derived.failClosed >= CONTINUATION_RULE_THRESHOLDS.failCloseWarn
+    },
+    {
+      key: 'recovery',
+      label: t('admin.ops.runtime.continuation.rules.recoveryPressure'),
+      threshold: t('admin.ops.runtime.continuation.rules.thresholdRecovery', {
+        low: CONTINUATION_RULE_THRESHOLDS.recoveryNotice,
+        high: CONTINUATION_RULE_THRESHOLDS.recoveryWarn
+      }),
+      observed: formatCount(derived.recoveries),
+      action:
+        derived.selfContainedRecoveries >= CONTINUATION_RULE_THRESHOLDS.selfContainedNotice
+          ? t('admin.ops.runtime.continuation.actions.healthy')
+          : t('admin.ops.runtime.continuation.actions.notInStrongMode'),
+      tone:
+        derived.recoveries >= CONTINUATION_RULE_THRESHOLDS.recoveryWarn
+          ? 'warning'
+          : derived.recoveries >= CONTINUATION_RULE_THRESHOLDS.recoveryNotice
+            ? 'info'
+            : 'success',
+      hit: derived.recoveries >= CONTINUATION_RULE_THRESHOLDS.recoveryNotice
+    },
+    {
+      key: 'persistence',
+      label: t('admin.ops.runtime.continuation.rules.persistence'),
+      threshold: t('admin.ops.runtime.continuation.rules.thresholdPersistence', {
+        count: CONTINUATION_RULE_THRESHOLDS.persistenceWarnMinCount
+      }),
+      observed: `${derived.persistentCount}/3`,
+      action: t('admin.ops.runtime.continuation.actions.persistence'),
+      tone:
+        derived.persistentCount < CONTINUATION_RULE_THRESHOLDS.persistenceWarnMinCount
+          ? 'warning'
+          : derived.persistentCount < 3
+            ? 'info'
+            : 'success',
+      hit: derived.persistentCount < 3
+    },
+    {
+      key: 'capacity',
+      label: t('admin.ops.runtime.continuation.rules.capacity'),
+      threshold: t('admin.ops.runtime.continuation.rules.thresholdCapacity', {
+        info: CONTINUATION_RULE_THRESHOLDS.saturationInfoPercent,
+        warn: CONTINUATION_RULE_THRESHOLDS.saturationWarnPercent
+      }),
+      observed: formatPercent(derived.saturationPercent),
+      action: t('admin.ops.runtime.continuation.actions.capacity'),
+      tone:
+        derived.saturationPercent >= CONTINUATION_RULE_THRESHOLDS.saturationWarnPercent
+          ? 'warning'
+          : derived.saturationPercent >= CONTINUATION_RULE_THRESHOLDS.saturationInfoPercent
+            ? 'info'
+            : 'success',
+      hit: derived.saturationPercent >= CONTINUATION_RULE_THRESHOLDS.saturationInfoPercent
+    },
+    {
+      key: 'conn_churn',
+      label: t('admin.ops.runtime.continuation.rules.connChurn'),
+      threshold: t('admin.ops.runtime.continuation.rules.thresholdAtLeast', {
+        count: CONTINUATION_RULE_THRESHOLDS.connChurnWarn
+      }),
+      observed: formatCount(derived.connDeleteCount),
+      action: t('admin.ops.runtime.continuation.actions.capacity'),
+      tone: derived.connDeleteCount >= CONTINUATION_RULE_THRESHOLDS.connChurnWarn ? 'info' : 'success',
+      hit: derived.connDeleteCount >= CONTINUATION_RULE_THRESHOLDS.connChurnWarn
+    }
+  ]
+
+  return rules
+})
+
 const continuationActionItems = computed<string[]>(() => {
   const snapshot = continuationSnapshot.value
-  if (!snapshot) return []
-
-  const counters = snapshot.counters
+  const derived = continuationDerivedStats.value
+  if (!snapshot || !derived) return []
   const config = snapshot.config
-  const state = snapshot.state
   const actions: string[] = []
 
   if (!config.enabled) {
@@ -523,35 +670,28 @@ const continuationActionItems = computed<string[]>(() => {
   if (config.force_http || !config.responses_websockets_v2) {
     actions.push(t('admin.ops.runtime.continuation.actions.notInStrongMode'))
   }
-  if (
-    counters.validation_reject_missing_call_id_total > 0 ||
-    counters.validation_reject_missing_item_reference_total > 0
-  ) {
+  if (derived.validationRejects >= CONTINUATION_RULE_THRESHOLDS.validationRejectWarn) {
     actions.push(t('admin.ops.runtime.continuation.actions.clientPayload'))
   }
-  if (
-    counters.prev_not_found_fail_closed_missing_anchor_total > 0 ||
-    counters.preflight_ping_fail_closed_missing_anchor_total > 0
-  ) {
+  if (derived.failClosed >= CONTINUATION_RULE_THRESHOLDS.failCloseWarn) {
     actions.push(t('admin.ops.runtime.continuation.actions.localAnchor'))
   }
   if (
-    !state.response_account_persistent ||
-    !state.session_turn_state_persistent ||
-    !state.session_last_response_persistent
+    derived.persistentCount < 3
   ) {
     actions.push(t('admin.ops.runtime.continuation.actions.persistence'))
   }
-  if (state.local_max_entries_per_map > 0) {
-    const maxEntries = Math.max(
-      state.response_account_local_entries,
-      state.response_conn_entries,
-      state.session_turn_state_entries,
-      state.session_last_response_entries,
-      state.session_conn_entries,
-      0
-    )
-    if (maxEntries / state.local_max_entries_per_map >= 0.8) {
+  if (derived.saturationPercent >= CONTINUATION_RULE_THRESHOLDS.saturationWarnPercent) {
+    actions.push(t('admin.ops.runtime.continuation.actions.capacity'))
+  } else if (derived.connDeleteCount >= CONTINUATION_RULE_THRESHOLDS.connChurnWarn) {
+    actions.push(t('admin.ops.runtime.continuation.actions.capacity'))
+  }
+  if (derived.recoveries >= CONTINUATION_RULE_THRESHOLDS.recoveryWarn) {
+    actions.push(t('admin.ops.runtime.continuation.actions.notInStrongMode'))
+  } else if (derived.selfContainedRecoveries >= CONTINUATION_RULE_THRESHOLDS.selfContainedNotice) {
+    actions.push(t('admin.ops.runtime.continuation.actions.healthy'))
+  } else if (snapshot.state.local_max_entries_per_map > 0) {
+    if (derived.saturationPercent >= CONTINUATION_RULE_THRESHOLDS.saturationWarnPercent) {
       actions.push(t('admin.ops.runtime.continuation.actions.capacity'))
     }
   }
@@ -559,7 +699,7 @@ const continuationActionItems = computed<string[]>(() => {
     actions.push(t('admin.ops.runtime.continuation.actions.healthy'))
   }
 
-  return actions
+  return Array.from(new Set(actions))
 })
 
 async function loadSettings() {
@@ -798,6 +938,51 @@ onMounted(() => {
             </div>
             <div class="mt-3 text-xs leading-5 text-gray-600 dark:text-gray-300">
               {{ item.description }}
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-600 dark:bg-dark-800">
+          <div class="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+            {{ t('admin.ops.runtime.continuation.diagnosisRulesTitle') }}
+          </div>
+          <div class="space-y-3">
+            <div
+              v-for="item in continuationDiagnosisRules"
+              :key="item.key"
+              class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+              :class="{
+                'bg-white dark:bg-dark-800': item.tone === 'neutral',
+                'bg-blue-50 dark:bg-blue-950/20': item.tone === 'info',
+                'bg-emerald-50 dark:bg-emerald-950/20': item.tone === 'success',
+                'bg-amber-50 dark:bg-amber-950/20': item.tone === 'warning'
+              }"
+            >
+              <div class="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div class="text-xs font-semibold text-gray-900 dark:text-white">{{ item.label }}</div>
+                  <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    {{ t('admin.ops.runtime.continuation.ruleThresholdLabel') }}:
+                    <span class="ml-1 font-mono">{{ item.threshold }}</span>
+                  </div>
+                  <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    {{ t('admin.ops.runtime.continuation.ruleObservedLabel') }}:
+                    <span class="ml-1 font-mono">{{ item.observed }}</span>
+                  </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold" :class="metricToneClass(item.tone)">
+                    {{
+                      item.hit
+                        ? t('admin.ops.runtime.continuation.ruleHit')
+                        : t('admin.ops.runtime.continuation.ruleNotHit')
+                    }}
+                  </span>
+                </div>
+              </div>
+              <div class="mt-2 text-xs text-gray-700 dark:text-gray-200">
+                {{ item.action }}
+              </div>
             </div>
           </div>
         </div>

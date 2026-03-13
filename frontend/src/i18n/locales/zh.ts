@@ -3718,7 +3718,12 @@ export default {
           title: 'Continuation 运行时',
           description: '展示 WSv2 continuation 的当前策略、恢复计数和本地状态快照，便于判断当前是保链、降级还是 fail-close。',
           source: '快照来源',
+          diagnosisRulesTitle: '诊断规则命中',
           nextActionsTitle: '建议下一步',
+          ruleThresholdLabel: '触发阈值',
+          ruleObservedLabel: '当前观测',
+          ruleHit: '已命中',
+          ruleNotHit: '未命中',
           loadFailed: '加载 continuation 运行时快照失败',
           loadFailedInline: '告警评估器设置已加载，但 continuation 运行时快照暂时不可用。',
           partialDataHint: '当前仅展示已成功拉取到的 continuation 快照；若计数异常，请继续结合后端日志定位。',
@@ -3748,6 +3753,18 @@ export default {
             preflightDropRetry: 'preflight 去锚点重试',
             preflightSelfContainedRetry: 'preflight 自包含重试',
             preflightMissingAnchorFailClose: 'preflight 缺锚点 fail-close'
+          },
+          rules: {
+            validation: '工具 payload 本地拒绝',
+            failClose: '无锚点 fail-close',
+            recoveryPressure: '恢复压力',
+            persistence: '关键状态持久化覆盖',
+            capacity: '本地状态容量压力',
+            connChurn: '连接清理 churn',
+            thresholdAtLeast: '>= {count}',
+            thresholdRecovery: '>= {low} 提示，>= {high} 警告',
+            thresholdPersistence: '< 3 即未全覆盖，< {count} 视为高风险',
+            thresholdCapacity: '>= {info}% 提示，>= {warn}% 警告'
           },
           summary: {
             labels: {

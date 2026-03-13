@@ -3545,7 +3545,12 @@ export default {
           title: 'Continuation Runtime',
           description: 'Shows the current WSv2 continuation strategy, recovery counters, and local state snapshot so operators can tell whether the gateway is preserving, degrading, or fail-closing a turn.',
           source: 'Snapshot source',
+          diagnosisRulesTitle: 'Diagnosis rules',
           nextActionsTitle: 'Suggested next actions',
+          ruleThresholdLabel: 'Threshold',
+          ruleObservedLabel: 'Observed',
+          ruleHit: 'Triggered',
+          ruleNotHit: 'Not triggered',
           loadFailed: 'Failed to load continuation runtime snapshot',
           loadFailedInline: 'Alert evaluator settings loaded, but the continuation runtime snapshot is currently unavailable.',
           partialDataHint: 'Only the continuation snapshot that successfully loaded is shown. If counters look suspicious, continue with backend logs.',
@@ -3575,6 +3580,18 @@ export default {
             preflightDropRetry: 'preflight drop retries',
             preflightSelfContainedRetry: 'preflight self-contained retries',
             preflightMissingAnchorFailClose: 'preflight missing anchor fail-close'
+          },
+          rules: {
+            validation: 'Local tool payload rejects',
+            failClose: 'Missing-anchor fail-close',
+            recoveryPressure: 'Recovery pressure',
+            persistence: 'Critical state persistence coverage',
+            capacity: 'Local state capacity pressure',
+            connChurn: 'Connection cleanup churn',
+            thresholdAtLeast: '>= {count}',
+            thresholdRecovery: '>= {low} notice, >= {high} warn',
+            thresholdPersistence: '< 3 means not fully covered, < {count} is high risk',
+            thresholdCapacity: '>= {info}% notice, >= {warn}% warn'
           },
           summary: {
             labels: {
