@@ -1218,6 +1218,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFunctionCallOutputRejectsWhenLastResponseIDMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIWSContinuationStatsForTest()
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
@@ -1937,6 +1938,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledStr
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFunctionCallOutputPreflightPingFailAlignsPrevID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIWSContinuationStatsForTest()
 	prevPreflightPingIdle := openAIWSIngressPreflightPingIdle
 	openAIWSIngressPreflightPingIdle = 0
 	defer func() {
@@ -2085,10 +2087,15 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 	require.Equal(t, "resp_turn_ping_fco_align_1", gjson.Get(secondWrite, "previous_response_id").String(), "preflight ping 恢复重试应对齐到上一轮 response.id")
 	require.Contains(t, secondWrite, `"call_id":"call_ping_align_1"`, "恢复重试应保留 function_call_output 的 call_id")
 	require.Contains(t, secondWrite, `"output":"ok"`, "恢复重试应保留 function_call_output 内容")
+	stats := OpenAIWSContinuationStats()
+	require.Equal(t, int64(1), stats.PreflightPingAlignRetryTotal)
+	require.Zero(t, stats.PreflightPingDropRetryTotal)
+	require.Zero(t, stats.PreflightPingFailClosedMissingAnchorTotal)
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFunctionCallOutputPreflightPingFailClosesWithoutLocalAnchor(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIWSContinuationStatsForTest()
 	prevPreflightPingIdle := openAIWSIngressPreflightPingIdle
 	openAIWSIngressPreflightPingIdle = 0
 	defer func() {
@@ -2224,10 +2231,15 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 	require.Equal(t, 1, dialer.DialCount(), "无本地锚点时不应在 preflight ping 失败后继续重试")
 	require.Equal(t, 1, firstConn.WriteCount(), "旧连接上只应发送首轮请求")
 	require.GreaterOrEqual(t, firstConn.PingCount(), 1, "第二轮前仍应执行 preflight ping")
+	stats := OpenAIWSContinuationStats()
+	require.Equal(t, int64(1), stats.PreflightPingFailClosedMissingAnchorTotal)
+	require.Zero(t, stats.PreflightPingDropRetryTotal)
+	require.Zero(t, stats.PreflightPingAlignRetryTotal)
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFunctionCallOutputPreflightPingFailDropsPrevIDWhenSelfContained(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIWSContinuationStatsForTest()
 	prevPreflightPingIdle := openAIWSIngressPreflightPingIdle
 	openAIWSIngressPreflightPingIdle = 0
 	defer func() {
@@ -2377,10 +2389,15 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledFun
 	require.Contains(t, secondWrite, `"type":"function_call"`)
 	require.Contains(t, secondWrite, `"call_id":"call_ping_self_contained_1"`)
 	require.Contains(t, secondWrite, `"type":"function_call_output"`)
+	stats := OpenAIWSContinuationStats()
+	require.Equal(t, int64(1), stats.PreflightPingDropRetryTotal)
+	require.Equal(t, int64(1), stats.PreflightPingDropSelfContainedRetryTotal)
+	require.Zero(t, stats.PreflightPingFailClosedMissingAnchorTotal)
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponseNotFoundFailClosesFunctionCallOutputWithoutLocalAnchor(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIWSContinuationStatsForTest()
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
@@ -2516,6 +2533,10 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponse
 	firstConn.mu.Unlock()
 	require.Len(t, firstWrites, 2, "旧连接应只处理首轮和失败的第二轮请求")
 	require.Equal(t, "resp_stale_external", gjson.Get(requestToJSONString(firstWrites[1]), "previous_response_id").String())
+	stats := OpenAIWSContinuationStats()
+	require.Equal(t, int64(1), stats.PrevNotFoundFailClosedMissingAnchorTotal)
+	require.Zero(t, stats.PrevNotFoundDropRetryTotal)
+	require.Zero(t, stats.PrevNotFoundAlignRetryTotal)
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_WriteFailBeforeDownstreamRetriesOnce(t *testing.T) {
@@ -3139,6 +3160,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponse
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponseNotFoundRecoversFunctionCallOutputByAligningPrevID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIWSContinuationStatsForTest()
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
@@ -3288,6 +3310,10 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponse
 	require.Equal(t, "resp_turn_prev_fco_align_1", gjson.Get(secondWrite, "previous_response_id").String(), "恢复重试应对齐到上一轮 response.id，而不是删除锚点")
 	require.Contains(t, secondWrite, `"call_id":"call_align_1"`, "恢复重试应保留 function_call_output 的 call_id")
 	require.Contains(t, secondWrite, `"output":"ok"`, "恢复重试应保留 function_call_output 内容")
+	stats := OpenAIWSContinuationStats()
+	require.Equal(t, int64(1), stats.PrevNotFoundAlignRetryTotal)
+	require.Zero(t, stats.PrevNotFoundDropRetryTotal)
+	require.Zero(t, stats.PrevNotFoundFailClosedMissingAnchorTotal)
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_RejectsMessageIDAsPreviousResponseID(t *testing.T) {
@@ -3388,6 +3414,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_RejectsMessageID
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponseNotFoundDropsPrevIDWhenFunctionCallOutputIsSelfContained(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIWSContinuationStatsForTest()
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
@@ -3533,6 +3560,10 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreviousResponse
 	require.Contains(t, secondWrite, `"type":"function_call"`)
 	require.Contains(t, secondWrite, `"call_id":"call_prev_self_contained_1"`)
 	require.Contains(t, secondWrite, `"type":"function_call_output"`)
+	stats := OpenAIWSContinuationStats()
+	require.Equal(t, int64(1), stats.PrevNotFoundDropRetryTotal)
+	require.Equal(t, int64(1), stats.PrevNotFoundDropSelfContainedRetryTotal)
+	require.Zero(t, stats.PrevNotFoundFailClosedMissingAnchorTotal)
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_RejectsFunctionCallOutputWithoutLocalContext(t *testing.T) {

@@ -2921,6 +2921,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					!wroteDownstream &&
 					(!turnHasFunctionCallOutput || recoverableFunctionCallOutputPrevNotFound || recoverableStandaloneFunctionCallOutputPrevNotFound)
 				if failClosedFunctionCallOutputPrevNotFound {
+					recordOpenAIWSContinuationPrevNotFoundFailClosedMissingAnchor()
 					logOpenAIWSModeInfo(
 						"ingress_ws_prev_response_fail_closed account_id=%d turn=%d conn_id=%s idx=%d reason=missing_local_anchor code=%s type=%s message=%s previous_response_id=%s previous_response_id_kind=%s has_function_call_output=%v response_id=%s store_disabled=%v has_prompt_cache_key=%v",
 						account.ID,
@@ -3246,6 +3247,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 						truncateOpenAIWSLogValue(setInputErr.Error(), openAIWSLogValueMaxLen),
 					)
 				} else {
+					recordOpenAIWSContinuationPrevNotFoundAlignRetry()
 					logOpenAIWSModeInfo(
 						"ingress_ws_prev_response_recovery account_id=%d turn=%d conn_id=%s action=align_previous_response_id retry=1 previous_response_id=%s expected_previous_response_id=%s from_session_state=%v",
 						account.ID,
@@ -3319,6 +3321,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return false
 		}
 		if currentPayloadHasFunctionCallOutput && standaloneRetryReason != "" {
+			recordOpenAIWSContinuationPrevNotFoundDropRetry(true)
 			logOpenAIWSModeInfo(
 				"ingress_ws_prev_response_recovery account_id=%d turn=%d conn_id=%s action=drop_previous_response_id_self_contained retry=1 reason=%s",
 				account.ID,
@@ -3327,6 +3330,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				normalizeOpenAIWSLogValue(standaloneRetryReason),
 			)
 		} else {
+			recordOpenAIWSContinuationPrevNotFoundDropRetry(false)
 			logOpenAIWSModeInfo(
 				"ingress_ws_prev_response_recovery account_id=%d turn=%d conn_id=%s action=drop_previous_response_id retry=1",
 				account.ID,
@@ -3581,6 +3585,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 							standaloneRetryReason = functionCallOutputStandaloneRetryReasonFromPayload(currentPayload)
 						}
 						if hasFunctionCallOutput && expectedPrevForPingRecovery == "" && standaloneRetryReason == "" {
+							recordOpenAIWSContinuationPreflightPingFailClosedMissingAnchor()
 							logOpenAIWSModeInfo(
 								"ingress_ws_preflight_ping_recovery_fail_closed account_id=%d turn=%d conn_id=%s reason=missing_local_anchor previous_response_id=%s has_function_call_output=%v",
 								account.ID,
@@ -3642,6 +3647,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 										truncateOpenAIWSLogValue(setInputErr.Error(), openAIWSLogValueMaxLen),
 									)
 								} else {
+									recordOpenAIWSContinuationPreflightPingAlignRetry()
 									logOpenAIWSModeInfo(
 										"ingress_ws_preflight_ping_recovery account_id=%d turn=%d conn_id=%s action=align_previous_response_id_retry previous_response_id=%s expected_previous_response_id=%s from_session_state=%v",
 										account.ID,
@@ -3692,6 +3698,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 								)
 							} else {
 								if hasFunctionCallOutput && standaloneRetryReason != "" {
+									recordOpenAIWSContinuationPreflightPingDropRetry(true)
 									logOpenAIWSModeInfo(
 										"ingress_ws_preflight_ping_recovery account_id=%d turn=%d conn_id=%s action=drop_previous_response_id_self_contained_retry previous_response_id=%s reason=%s",
 										account.ID,
@@ -3701,6 +3708,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 										normalizeOpenAIWSLogValue(standaloneRetryReason),
 									)
 								} else {
+									recordOpenAIWSContinuationPreflightPingDropRetry(false)
 									logOpenAIWSModeInfo(
 										"ingress_ws_preflight_ping_recovery account_id=%d turn=%d conn_id=%s action=drop_previous_response_id_retry previous_response_id=%s",
 										account.ID,

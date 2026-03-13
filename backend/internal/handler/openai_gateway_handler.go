@@ -832,6 +832,7 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 	}
 
 	if validation.HasFunctionCallOutputMissingCallID {
+		service.RecordOpenAIWSContinuationValidationReject("function_call_output_missing_call_id")
 		reqLog.Warn("openai.request_validation_failed",
 			zap.String("reason", "function_call_output_missing_call_id"),
 		)
@@ -845,6 +846,7 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 	reqLog.Warn("openai.request_validation_failed",
 		zap.String("reason", "function_call_output_missing_item_reference"),
 	)
+	service.RecordOpenAIWSContinuationValidationReject("function_call_output_missing_item_reference")
 	h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires item_reference ids matching each call_id, or previous_response_id/tool_call context; if relying on history, ensure store=true and reuse previous_response_id")
 	return false
 }

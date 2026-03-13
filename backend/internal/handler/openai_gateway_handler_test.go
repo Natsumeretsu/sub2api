@@ -431,6 +431,68 @@ func TestOpenAIResponses_RejectsMessageIDAsPreviousResponseID(t *testing.T) {
 	require.Contains(t, w.Body.String(), "previous_response_id must be a response.id")
 }
 
+func TestOpenAIResponses_RejectsFunctionCallOutputMissingCallIDAndRecordsStats(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(
+		`{"model":"gpt-5.1","stream":false,"input":[{"type":"function_call_output","output":"ok"}]}`,
+	))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	groupID := int64(2)
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		ID:      101,
+		GroupID: &groupID,
+		User:    &service.User{ID: 1},
+	})
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{
+		UserID:      1,
+		Concurrency: 1,
+	})
+
+	before := service.OpenAIWSContinuationStats()
+	h := newOpenAIHandlerForPreviousResponseIDValidation(t, nil)
+	h.Responses(c)
+	after := service.OpenAIWSContinuationStats()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "function_call_output requires call_id or previous_response_id")
+	require.Equal(t, before.ValidationRejectMissingCallIDTotal+1, after.ValidationRejectMissingCallIDTotal)
+}
+
+func TestOpenAIResponses_RejectsFunctionCallOutputMissingItemReferenceAndRecordsStats(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(
+		`{"model":"gpt-5.1","stream":false,"input":[{"type":"function_call_output","call_id":"call_missing_ref","output":"ok"}]}`,
+	))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	groupID := int64(2)
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		ID:      101,
+		GroupID: &groupID,
+		User:    &service.User{ID: 1},
+	})
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{
+		UserID:      1,
+		Concurrency: 1,
+	})
+
+	before := service.OpenAIWSContinuationStats()
+	h := newOpenAIHandlerForPreviousResponseIDValidation(t, nil)
+	h.Responses(c)
+	after := service.OpenAIWSContinuationStats()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "function_call_output requires item_reference ids matching each call_id")
+	require.Equal(t, before.ValidationRejectMissingItemReferenceTotal+1, after.ValidationRejectMissingItemReferenceTotal)
+}
+
 func TestOpenAIResponsesWebSocket_SetsClientTransportWSWhenUpgradeValid(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
