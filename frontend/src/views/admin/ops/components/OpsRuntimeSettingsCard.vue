@@ -140,6 +140,14 @@ type ContinuationDisplayItem = {
   tone?: 'neutral' | 'info' | 'success' | 'warning'
 }
 
+type ContinuationSummaryItem = {
+  key: string
+  label: string
+  value: string
+  description: string
+  tone: 'neutral' | 'info' | 'success' | 'warning'
+}
+
 function boolLabel(value: boolean | null | undefined): string {
   return value ? t('common.enabled') : t('common.disabled')
 }
@@ -159,6 +167,11 @@ function metricToneClass(tone: ContinuationDisplayItem['tone']): string {
 
 function formatCount(value: number | null | undefined): string {
   return typeof value === 'number' && Number.isFinite(value) ? String(value) : '0'
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '0%'
+  return `${Math.round(value)}%`
 }
 
 const continuationModeBadges = computed<ContinuationDisplayItem[]>(() => {
@@ -371,6 +384,182 @@ const continuationStateLimitItems = computed<ContinuationDisplayItem[]>(() => {
     { key: 'local_max_entries_per_map', label: t('admin.ops.runtime.continuation.state.localMaxEntriesPerMap'), value: formatCount(state.local_max_entries_per_map) },
     { key: 'redis_timeout_ms', label: t('admin.ops.runtime.continuation.state.redisTimeoutMs'), value: `${state.redis_timeout_ms}ms` }
   ]
+})
+
+const continuationSummaryItems = computed<ContinuationSummaryItem[]>(() => {
+  const snapshot = continuationSnapshot.value
+  if (!snapshot) return []
+
+  const counters = snapshot.counters
+  const config = snapshot.config
+  const state = snapshot.state
+
+  const validationRejects =
+    counters.validation_reject_missing_call_id_total +
+    counters.validation_reject_missing_item_reference_total
+  const failClosed =
+    counters.prev_not_found_fail_closed_missing_anchor_total +
+    counters.preflight_ping_fail_closed_missing_anchor_total
+  const recoveries =
+    counters.prev_not_found_align_retry_total +
+    counters.prev_not_found_drop_retry_total +
+    counters.prev_not_found_drop_self_contained_retry_total +
+    counters.preflight_ping_align_retry_total +
+    counters.preflight_ping_drop_retry_total +
+    counters.preflight_ping_drop_self_contained_retry_total
+  const selfContainedRecoveries =
+    counters.prev_not_found_drop_self_contained_retry_total +
+    counters.preflight_ping_drop_self_contained_retry_total
+
+  const persistentCount = [
+    state.response_account_persistent,
+    state.session_turn_state_persistent,
+    state.session_last_response_persistent
+  ].filter(Boolean).length
+  const persistencePercent = (persistentCount / 3) * 100
+
+  const maxEntries = Math.max(
+    state.response_account_local_entries,
+    state.response_conn_entries,
+    state.session_turn_state_entries,
+    state.session_last_response_entries,
+    state.session_conn_entries,
+    0
+  )
+  const saturationPercent =
+    state.local_max_entries_per_map > 0 ? (maxEntries / state.local_max_entries_per_map) * 100 : 0
+
+  let postureValue = t('admin.ops.runtime.continuation.summary.posture.healthy')
+  let postureDesc = t('admin.ops.runtime.continuation.summary.postureHealthyDesc')
+  let postureTone: ContinuationSummaryItem['tone'] = 'success'
+
+  if (!config.enabled) {
+    postureValue = t('admin.ops.runtime.continuation.summary.posture.disabled')
+    postureDesc = t('admin.ops.runtime.continuation.summary.postureDisabledDesc')
+    postureTone = 'warning'
+  } else if (config.force_http || !config.responses_websockets_v2) {
+    postureValue = t('admin.ops.runtime.continuation.summary.posture.degraded')
+    postureDesc = t('admin.ops.runtime.continuation.summary.postureDegradedDesc')
+    postureTone = 'warning'
+  } else if (failClosed > 0 || validationRejects > 0) {
+    postureValue = t('admin.ops.runtime.continuation.summary.posture.attention')
+    postureDesc = t('admin.ops.runtime.continuation.summary.postureAttentionDesc')
+    postureTone = 'warning'
+  } else if (recoveries > 0) {
+    postureValue = t('admin.ops.runtime.continuation.summary.posture.recovering')
+    postureDesc = t('admin.ops.runtime.continuation.summary.postureRecoveringDesc')
+    postureTone = 'info'
+  }
+
+  let experienceValue = t('admin.ops.runtime.continuation.summary.experience.stable')
+  let experienceDesc = t('admin.ops.runtime.continuation.summary.experienceStableDesc')
+  let experienceTone: ContinuationSummaryItem['tone'] = 'success'
+  if (failClosed > 0) {
+    experienceValue = t('admin.ops.runtime.continuation.summary.experience.failClose')
+    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceFailCloseDesc', { count: failClosed })
+    experienceTone = 'warning'
+  } else if (selfContainedRecoveries > 0) {
+    experienceValue = t('admin.ops.runtime.continuation.summary.experience.selfContained')
+    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceSelfContainedDesc', { count: selfContainedRecoveries })
+    experienceTone = 'success'
+  } else if (recoveries > 0) {
+    experienceValue = t('admin.ops.runtime.continuation.summary.experience.recovered')
+    experienceDesc = t('admin.ops.runtime.continuation.summary.experienceRecoveredDesc', { count: recoveries })
+    experienceTone = 'info'
+  }
+
+  const persistenceTone: ContinuationSummaryItem['tone'] =
+    persistentCount === 3 ? 'success' : persistentCount >= 1 ? 'info' : 'warning'
+  const saturationTone: ContinuationSummaryItem['tone'] =
+    saturationPercent >= 80 ? 'warning' : saturationPercent >= 50 ? 'info' : 'success'
+
+  return [
+    {
+      key: 'posture',
+      label: t('admin.ops.runtime.continuation.summary.labels.posture'),
+      value: postureValue,
+      description: postureDesc,
+      tone: postureTone
+    },
+    {
+      key: 'experience',
+      label: t('admin.ops.runtime.continuation.summary.labels.experience'),
+      value: experienceValue,
+      description: experienceDesc,
+      tone: experienceTone
+    },
+    {
+      key: 'persistence',
+      label: t('admin.ops.runtime.continuation.summary.labels.persistence'),
+      value: `${persistentCount}/3 (${formatPercent(persistencePercent)})`,
+      description: t('admin.ops.runtime.continuation.summary.persistenceDesc', { count: persistentCount }),
+      tone: persistenceTone
+    },
+    {
+      key: 'saturation',
+      label: t('admin.ops.runtime.continuation.summary.labels.saturation'),
+      value: formatPercent(saturationPercent),
+      description: t('admin.ops.runtime.continuation.summary.saturationDesc', {
+        entries: maxEntries,
+        limit: state.local_max_entries_per_map
+      }),
+      tone: saturationTone
+    }
+  ]
+})
+
+const continuationActionItems = computed<string[]>(() => {
+  const snapshot = continuationSnapshot.value
+  if (!snapshot) return []
+
+  const counters = snapshot.counters
+  const config = snapshot.config
+  const state = snapshot.state
+  const actions: string[] = []
+
+  if (!config.enabled) {
+    actions.push(t('admin.ops.runtime.continuation.actions.gatewayDisabled'))
+  }
+  if (config.force_http || !config.responses_websockets_v2) {
+    actions.push(t('admin.ops.runtime.continuation.actions.notInStrongMode'))
+  }
+  if (
+    counters.validation_reject_missing_call_id_total > 0 ||
+    counters.validation_reject_missing_item_reference_total > 0
+  ) {
+    actions.push(t('admin.ops.runtime.continuation.actions.clientPayload'))
+  }
+  if (
+    counters.prev_not_found_fail_closed_missing_anchor_total > 0 ||
+    counters.preflight_ping_fail_closed_missing_anchor_total > 0
+  ) {
+    actions.push(t('admin.ops.runtime.continuation.actions.localAnchor'))
+  }
+  if (
+    !state.response_account_persistent ||
+    !state.session_turn_state_persistent ||
+    !state.session_last_response_persistent
+  ) {
+    actions.push(t('admin.ops.runtime.continuation.actions.persistence'))
+  }
+  if (state.local_max_entries_per_map > 0) {
+    const maxEntries = Math.max(
+      state.response_account_local_entries,
+      state.response_conn_entries,
+      state.session_turn_state_entries,
+      state.session_last_response_entries,
+      state.session_conn_entries,
+      0
+    )
+    if (maxEntries / state.local_max_entries_per_map >= 0.8) {
+      actions.push(t('admin.ops.runtime.continuation.actions.capacity'))
+    }
+  }
+  if (actions.length === 0) {
+    actions.push(t('admin.ops.runtime.continuation.actions.healthy'))
+  }
+
+  return actions
 })
 
 async function loadSettings() {
@@ -591,6 +780,38 @@ onMounted(() => {
               <span>{{ item.value }}</span>
             </span>
           </div>
+        </div>
+
+        <div class="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div
+            v-for="item in continuationSummaryItems"
+            :key="item.key"
+            class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-600 dark:bg-dark-800"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                {{ item.label }}
+              </div>
+              <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold" :class="metricToneClass(item.tone)">
+                {{ item.value }}
+              </span>
+            </div>
+            <div class="mt-3 text-xs leading-5 text-gray-600 dark:text-gray-300">
+              {{ item.description }}
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-600 dark:bg-dark-800">
+          <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+            {{ t('admin.ops.runtime.continuation.nextActionsTitle') }}
+          </div>
+          <ul class="space-y-2 text-xs text-gray-700 dark:text-gray-200">
+            <li v-for="item in continuationActionItems" :key="item" class="flex items-start gap-2">
+              <span class="mt-[3px] inline-block h-1.5 w-1.5 rounded-full bg-blue-500"></span>
+              <span>{{ item }}</span>
+            </li>
+          </ul>
         </div>
 
         <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">

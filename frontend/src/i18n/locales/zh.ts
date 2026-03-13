@@ -3718,6 +3718,7 @@ export default {
           title: 'Continuation 运行时',
           description: '展示 WSv2 continuation 的当前策略、恢复计数和本地状态快照，便于判断当前是保链、降级还是 fail-close。',
           source: '快照来源',
+          nextActionsTitle: '建议下一步',
           loadFailed: '加载 continuation 运行时快照失败',
           loadFailedInline: '告警评估器设置已加载，但 continuation 运行时快照暂时不可用。',
           partialDataHint: '当前仅展示已成功拉取到的 continuation 快照；若计数异常，请继续结合后端日志定位。',
@@ -3747,6 +3748,47 @@ export default {
             preflightDropRetry: 'preflight 去锚点重试',
             preflightSelfContainedRetry: 'preflight 自包含重试',
             preflightMissingAnchorFailClose: 'preflight 缺锚点 fail-close'
+          },
+          summary: {
+            labels: {
+              posture: '当前姿态',
+              experience: '用户体验',
+              persistence: '持久化覆盖',
+              saturation: '本地容量压力'
+            },
+            posture: {
+              healthy: '强保链',
+              recovering: '受控恢复',
+              attention: '需要关注',
+              degraded: '降级模式',
+              disabled: '未启用'
+            },
+            postureHealthyDesc: '当前处在 WSv2 强 continuation 模式，且没有明显的本地拒绝或 fail-close 迹象。',
+            postureRecoveringDesc: '当前已经出现受控恢复样本，但仍在优先保住当轮请求，没有退化成模糊重放。',
+            postureAttentionDesc: '当前出现了本地拒绝或 fail-close，建议优先排查客户端工具回合或本地锚点链路。',
+            postureDegradedDesc: '当前不在最强 continuation 模式，体验会更依赖 transport 或上游行为。',
+            postureDisabledDesc: '当前 continuation 网关能力没有完全启用，恢复语义会明显收缩。',
+            experience: {
+              stable: '稳定直通',
+              recovered: '自动恢复生效',
+              selfContained: '自包含降级生效',
+              failClose: '已出现 fail-close'
+            },
+            experienceStableDesc: '最近没有命中显式恢复或 fail-close，用户大概率感知为平稳续链。',
+            experienceRecoveredDesc: '最近已经有 {count} 次本地对齐或重试恢复，当前体验更偏自动修复。',
+            experienceSelfContainedDesc: '最近已经有 {count} 次自包含降级重试成功，说明体验优先策略正在工作。',
+            experienceFailCloseDesc: '最近已有 {count} 次无锚点 fail-close，用户会直接感知为工具回合中断。',
+            persistenceDesc: '当前 3 个关键状态面中已有 {count} 个具备持久化支撑。',
+            saturationDesc: '当前本地最大条目数为 {entries}，单 map 上限为 {limit}。'
+          },
+          actions: {
+            gatewayDisabled: '当前 continuation 能力没有完全开启，先检查网关运行模式与 transport 配置。',
+            notInStrongMode: '当前不在 WSv2 强 continuation 模式，先确认客户端或部署路径是否退化到了 HTTP 或强制降级模式。',
+            clientPayload: '已经出现工具 payload 本地拒绝，优先检查客户端是否稳定带上 call_id、item_reference 或自包含工具上下文。',
+            localAnchor: '已经出现无本地锚点 fail-close，优先检查 session 粘连、previous_response_id 与 TTL 是否还能支撑这条链。',
+            persistence: '当前仍有关键状态只在本进程有效，跨实例或重启后的恢复能力仍然有限。',
+            capacity: '本地状态条目已经逼近单 map 容量上限，建议结合 churn、TTL 和连接回收继续排查。',
+            healthy: '当前没有明显异常，下一步更适合继续观察 churn、TTL 与跨实例恢复指标，而不是再加恢复分支。'
           },
           config: {
             responsesWebsockets: '启用 WebSocket Responses',

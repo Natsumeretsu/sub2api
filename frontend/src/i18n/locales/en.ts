@@ -3545,6 +3545,7 @@ export default {
           title: 'Continuation Runtime',
           description: 'Shows the current WSv2 continuation strategy, recovery counters, and local state snapshot so operators can tell whether the gateway is preserving, degrading, or fail-closing a turn.',
           source: 'Snapshot source',
+          nextActionsTitle: 'Suggested next actions',
           loadFailed: 'Failed to load continuation runtime snapshot',
           loadFailedInline: 'Alert evaluator settings loaded, but the continuation runtime snapshot is currently unavailable.',
           partialDataHint: 'Only the continuation snapshot that successfully loaded is shown. If counters look suspicious, continue with backend logs.',
@@ -3574,6 +3575,47 @@ export default {
             preflightDropRetry: 'preflight drop retries',
             preflightSelfContainedRetry: 'preflight self-contained retries',
             preflightMissingAnchorFailClose: 'preflight missing anchor fail-close'
+          },
+          summary: {
+            labels: {
+              posture: 'Current posture',
+              experience: 'User experience',
+              persistence: 'Persistence coverage',
+              saturation: 'Local capacity pressure'
+            },
+            posture: {
+              healthy: 'Strong continuation',
+              recovering: 'Controlled recovery',
+              attention: 'Needs attention',
+              degraded: 'Degraded mode',
+              disabled: 'Disabled'
+            },
+            postureHealthyDesc: 'WSv2 strong continuation is active and there are no obvious local rejects or fail-close signals right now.',
+            postureRecoveringDesc: 'Controlled recovery is active and the gateway is still prioritizing turn completion without falling back to ambiguous replay.',
+            postureAttentionDesc: 'Local rejects or fail-close events are present. Check client tool turns and local anchor continuity first.',
+            postureDegradedDesc: 'The gateway is not on the strongest continuation surface, so user experience depends more on transport and upstream behavior.',
+            postureDisabledDesc: 'Continuation features are not fully enabled, so recovery semantics are intentionally narrower.',
+            experience: {
+              stable: 'Stable passthrough',
+              recovered: 'Auto recovery active',
+              selfContained: 'Self-contained fallback active',
+              failClose: 'Fail-close observed'
+            },
+            experienceStableDesc: 'No explicit recovery or fail-close activity is visible, so users are likely seeing smooth continuation.',
+            experienceRecoveredDesc: '{count} local align or retry recoveries have already occurred, so the current experience is skewed toward automatic repair.',
+            experienceSelfContainedDesc: '{count} self-contained fallback retries have already succeeded, which shows the UX-first policy is working.',
+            experienceFailCloseDesc: '{count} missing-anchor fail-close events already occurred, so users will directly feel interrupted tool turns.',
+            persistenceDesc: '{count} of 3 critical state surfaces currently have persistence support.',
+            saturationDesc: 'The largest local entry count is {entries} and the per-map limit is {limit}.'
+          },
+          actions: {
+            gatewayDisabled: 'Continuation is not fully enabled. Check gateway mode and transport configuration first.',
+            notInStrongMode: 'The gateway is not in WSv2 strong continuation mode. Confirm whether the client or deployment path has degraded to HTTP or another fallback mode.',
+            clientPayload: 'Local validation rejects are present. Check whether the client consistently sends call_id, item_reference, or self-contained tool context.',
+            localAnchor: 'Missing-local-anchor fail-close events are present. Check session affinity, previous_response_id, and TTL support for the turn chain first.',
+            persistence: 'Some critical state is still process-local, so cross-instance or post-restart recovery remains limited.',
+            capacity: 'Local state entries are approaching the per-map limit. Continue with churn, TTL, and connection cleanup checks.',
+            healthy: 'No obvious issue is visible right now. The next useful step is to watch churn, TTL, and cross-instance recovery instead of adding more recovery branches.'
           },
           config: {
             responsesWebsockets: 'Responses over WebSocket',
