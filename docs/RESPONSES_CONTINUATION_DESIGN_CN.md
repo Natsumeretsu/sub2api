@@ -49,6 +49,7 @@
 - 当前默认策略仍偏 correctness-first，不是 cache-hit / 少建连 / 少状态同时最优
 - `/compact` 仍需要单独做 capability contract，不能假装与普通 `/responses` 完全等价
 - 非原生 upstream、跨协议转换、跨实例漂移仍有额外语义边界
+- 非流式 `/responses` / `/responses/compact` 的成功响应如果为空体、半截 SSE、或完成后仍缺 final response payload，必须视为协议级失败；不能再把 `200 + 空 body` 原样回给客户端
 
 ## 2. 外部交叉验证结论
 
@@ -178,6 +179,7 @@ OpenAI 官方文档指向两个核心事实：
 - WS ingress turn 在 `wroteDownstream=true` 时，会显式阻断本轮重试，并记录对应的 duplicate-turn / emitted-bytes 计数
 - 调度器已显式区分 `continuation cohort / degraded cohort`，并把请求 cohort、选中 cohort 与 cohort fallback 作为决策字段输出，避免“只看 transport 看不见语义层级”
 - `prompt_cache_key` 已进入 scheduler 的 cache-affinity 输入；调度决策不再只看 availability 和 cohort，而会在同 cohort 候选里优先选择与当前 cache-affinity 更匹配的账号，把 continuation 亲和与缓存前缀亲和一起前置
+- 非流式 `/responses` / `/responses/compact` 在 API key passthrough 和 OAuth SSE-to-JSON 两条链上，都已经补了协议完整性校验：空 body、半截 SSE、或 `response.completed/response.done` 后缺 final response payload 时，不再透传 `200` 成功，而是先构造成 `502` 的可重试协议级 failover，让 handler 侧优先走同账号/跨账号受控重试
 
 ### 4.2 暂不实施
 
