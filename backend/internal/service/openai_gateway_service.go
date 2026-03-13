@@ -1122,6 +1122,22 @@ func IsOpenAIContinuationStrongCohort(c *gin.Context) bool {
 	return strong
 }
 
+func buildOpenAIStrongCohortDegradeFailover(account *Account, transport OpenAIUpstreamTransport) *UpstreamFailoverError {
+	accountID := int64(0)
+	if account != nil {
+		accountID = account.ID
+	}
+	body := []byte(fmt.Sprintf(
+		`{"error":{"type":"api_error","message":"Strong continuation cannot silently downgrade to %s on account %d; retry later to preserve session continuity and cache affinity"}}`,
+		string(transport),
+		accountID,
+	))
+	return &UpstreamFailoverError{
+		StatusCode:   http.StatusServiceUnavailable,
+		ResponseBody: body,
+	}
+}
+
 func isOpenAIRemoteCompactRequest(c *gin.Context) bool {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
@@ -1960,6 +1976,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// UX-first: 对已进入强 continuation cohort 的会话，在 HTTP 降级路径上尽量保留 previous_response_id，
 	// 避免静默打断续链并放大输入 token；其余弱会话仍保持原有过滤行为。
 	if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
+		if IsOpenAIContinuationStrongCohort(c) && !isOpenAIRemoteCompactRequest(c) {
+			RecordOpenAIWSContinuationStrongCohortDegradeBlocked()
+			logOpenAIWSModeInfo(
+				"strong_cohort_transport_degrade_blocked account_id=%d transport=%s client_transport=%s",
+				account.ID,
+				normalizeOpenAIWSLogValue(string(wsDecision.Transport)),
+				normalizeOpenAIWSLogValue(string(GetOpenAIClientTransport(c))),
+			)
+			return nil, buildOpenAIStrongCohortDegradeFailover(account, wsDecision.Transport)
+		}
 		if _, has := reqBody["previous_response_id"]; has {
 			if isOpenAIRemoteCompactRequest(c) {
 				delete(reqBody, "previous_response_id")

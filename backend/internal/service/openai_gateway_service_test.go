@@ -574,6 +574,15 @@ func TestResolveOpenAIWSRequiredTransportForAnchor(t *testing.T) {
 	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIWSRequiredTransportForAnchor(OpenAIWSContinuationAnchor{}))
 }
 
+func TestBuildOpenAIStrongCohortDegradeFailover(t *testing.T) {
+	account := &Account{ID: 9091}
+	failoverErr := buildOpenAIStrongCohortDegradeFailover(account, OpenAIUpstreamTransportHTTPSSE)
+	require.NotNil(t, failoverErr)
+	require.Equal(t, http.StatusServiceUnavailable, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "Strong continuation cannot silently downgrade")
+	require.Contains(t, string(failoverErr.ResponseBody), string(OpenAIUpstreamTransportHTTPSSE))
+}
+
 func TestOpenAISelectAccountForModelWithExclusions_NoModelSupport(t *testing.T) {
 	repo := stubOpenAIAccountRepo{
 		accounts: []Account{

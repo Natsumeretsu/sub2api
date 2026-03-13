@@ -369,6 +369,25 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if scheduleDecision.CohortFallback && scheduleDecision.RequestedCohort == string(service.OpenAIContinuationCohortStrong) {
 			service.RecordOpenAIWSContinuationStrongCohortFallback()
 		}
+		if scheduleDecision.RequestedCohort == string(service.OpenAIContinuationCohortStrong) &&
+			scheduleDecision.SelectedCohort == string(service.OpenAIContinuationCohortDegraded) {
+			service.RecordOpenAIWSContinuationStrongCohortDegradeBlocked()
+			reqLog.Warn("openai.strong_cohort_degrade_blocked",
+				zap.String("layer", scheduleDecision.Layer),
+				zap.Bool("cohort_fallback", scheduleDecision.CohortFallback),
+				zap.Bool("has_previous_response_id", strings.TrimSpace(previousResponseID) != ""),
+				zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+				zap.Int64("sticky_account_id", anchor.StickyAccountID),
+			)
+			h.handleStreamingAwareError(
+				c,
+				http.StatusServiceUnavailable,
+				"api_error",
+				"Strong continuation is temporarily unavailable; retry later to preserve session continuity and cache affinity",
+				streamStarted,
+			)
+			return
+		}
 		if scheduleDecision.CacheAffinityUsed {
 			service.RecordOpenAIWSContinuationCacheAffinitySelection()
 		}

@@ -10,11 +10,13 @@ import (
 type OpenAIWSContinuationStatsSnapshot struct {
 	ValidationRejectMissingCallIDTotal        int64
 	ValidationRejectMissingItemReferenceTotal int64
+	TurnStoreFallbackTotal                    int64
 	WSToHTTPMidSessionTotal                   int64
 	PreviousResponseRecoveredFromSessionTotal int64
 	PreviousResponseStrippedMidSessionTotal   int64
 	AccountSwitchWithCacheDropTotal           int64
 	StrongCohortFallbackTotal                 int64
+	StrongCohortDegradeBlockedTotal           int64
 	CacheAffinitySelectionTotal               int64
 	DuplicateTurnRetryBlockedAfterEmitTotal   int64
 	EmittedBytesBeforeRetryTotal              int64
@@ -37,11 +39,13 @@ type OpenAIWSContinuationStatsSnapshot struct {
 var (
 	openAIWSContinuationValidationRejectMissingCallIDTotal        atomic.Int64
 	openAIWSContinuationValidationRejectMissingItemReferenceTotal atomic.Int64
+	openAIWSContinuationTurnStoreFallbackTotal                    atomic.Int64
 	openAIWSContinuationWSToHTTPMidSessionTotal                   atomic.Int64
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal atomic.Int64
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal   atomic.Int64
 	openAIWSContinuationAccountSwitchWithCacheDropTotal           atomic.Int64
 	openAIWSContinuationStrongCohortFallbackTotal                 atomic.Int64
+	openAIWSContinuationStrongCohortDegradeBlockedTotal           atomic.Int64
 	openAIWSContinuationCacheAffinitySelectionTotal               atomic.Int64
 	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal   atomic.Int64
 	openAIWSContinuationEmittedBytesBeforeRetryTotal              atomic.Int64
@@ -65,11 +69,13 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 	return OpenAIWSContinuationStatsSnapshot{
 		ValidationRejectMissingCallIDTotal:        openAIWSContinuationValidationRejectMissingCallIDTotal.Load(),
 		ValidationRejectMissingItemReferenceTotal: openAIWSContinuationValidationRejectMissingItemReferenceTotal.Load(),
+		TurnStoreFallbackTotal:                    openAIWSContinuationTurnStoreFallbackTotal.Load(),
 		WSToHTTPMidSessionTotal:                   openAIWSContinuationWSToHTTPMidSessionTotal.Load(),
 		PreviousResponseRecoveredFromSessionTotal: openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Load(),
 		PreviousResponseStrippedMidSessionTotal:   openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Load(),
 		AccountSwitchWithCacheDropTotal:           openAIWSContinuationAccountSwitchWithCacheDropTotal.Load(),
 		StrongCohortFallbackTotal:                 openAIWSContinuationStrongCohortFallbackTotal.Load(),
+		StrongCohortDegradeBlockedTotal:           openAIWSContinuationStrongCohortDegradeBlockedTotal.Load(),
 		CacheAffinitySelectionTotal:               openAIWSContinuationCacheAffinitySelectionTotal.Load(),
 		DuplicateTurnRetryBlockedAfterEmitTotal:   openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Load(),
 		EmittedBytesBeforeRetryTotal:              openAIWSContinuationEmittedBytesBeforeRetryTotal.Load(),
@@ -111,6 +117,10 @@ func RecordOpenAIWSContinuationWSToHTTPMidSession() {
 	openAIWSContinuationWSToHTTPMidSessionTotal.Add(1)
 }
 
+func RecordOpenAIWSContinuationTurnStoreFallback() {
+	openAIWSContinuationTurnStoreFallbackTotal.Add(1)
+}
+
 func RecordOpenAIWSContinuationPreviousResponseRecoveredFromSession() {
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Add(1)
 }
@@ -125,6 +135,10 @@ func RecordOpenAIWSContinuationAccountSwitchWithCacheDrop() {
 
 func RecordOpenAIWSContinuationStrongCohortFallback() {
 	openAIWSContinuationStrongCohortFallbackTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationStrongCohortDegradeBlocked() {
+	openAIWSContinuationStrongCohortDegradeBlockedTotal.Add(1)
 }
 
 func RecordOpenAIWSContinuationCacheAffinitySelection() {
@@ -197,11 +211,13 @@ func recordOpenAIWSContinuationPreflightPingFailClosed(reason string) {
 func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationValidationRejectMissingCallIDTotal.Store(0)
 	openAIWSContinuationValidationRejectMissingItemReferenceTotal.Store(0)
+	openAIWSContinuationTurnStoreFallbackTotal.Store(0)
 	openAIWSContinuationWSToHTTPMidSessionTotal.Store(0)
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Store(0)
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Store(0)
 	openAIWSContinuationAccountSwitchWithCacheDropTotal.Store(0)
 	openAIWSContinuationStrongCohortFallbackTotal.Store(0)
+	openAIWSContinuationStrongCohortDegradeBlockedTotal.Store(0)
 	openAIWSContinuationCacheAffinitySelectionTotal.Store(0)
 	openAIWSContinuationDuplicateTurnRetryBlockedAfterEmitTotal.Store(0)
 	openAIWSContinuationEmittedBytesBeforeRetryTotal.Store(0)

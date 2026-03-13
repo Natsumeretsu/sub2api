@@ -2,10 +2,42 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+type failingOpenAIResponsesTurnRepo struct{}
+
+func (failingOpenAIResponsesTurnRepo) CreateProcessing(context.Context, *IdempotencyRecord) (bool, error) {
+	return false, errors.New("primary unavailable")
+}
+
+func (failingOpenAIResponsesTurnRepo) GetByScopeAndKeyHash(context.Context, string, string) (*IdempotencyRecord, error) {
+	return nil, errors.New("primary unavailable")
+}
+
+func (failingOpenAIResponsesTurnRepo) TryReclaim(context.Context, int64, string, time.Time, time.Time, time.Time) (bool, error) {
+	return false, errors.New("primary unavailable")
+}
+
+func (failingOpenAIResponsesTurnRepo) ExtendProcessingLock(context.Context, int64, string, time.Time, time.Time) (bool, error) {
+	return false, errors.New("primary unavailable")
+}
+
+func (failingOpenAIResponsesTurnRepo) MarkSucceeded(context.Context, int64, int, string, time.Time) error {
+	return errors.New("primary unavailable")
+}
+
+func (failingOpenAIResponsesTurnRepo) MarkFailedRetryable(context.Context, int64, string, time.Time, time.Time) error {
+	return errors.New("primary unavailable")
+}
+
+func (failingOpenAIResponsesTurnRepo) DeleteExpired(context.Context, time.Time, int) (int64, error) {
+	return 0, errors.New("primary unavailable")
+}
 
 func TestOpenAIResponsesTurnCoordinator_DuplicateLifecycleAndReclaim(t *testing.T) {
 	repo := newInMemoryIdempotencyRepo()
@@ -85,7 +117,7 @@ func TestOpenAIResponsesTurnCoordinator_DuplicateLifecycleAndReclaim(t *testing.
 	require.Equal(t, "resp_completed_1", duplicate.State.ResponseID)
 }
 
-func TestOpenAIResponsesTurnCoordinator_IgnoresTransportAndCohortDriftInFingerprint(t *testing.T) {
+func TestOpenAIResponsesTurnCoordinator_IgnoresDescriptorDriftInFingerprint(t *testing.T) {
 	repo := newInMemoryIdempotencyRepo()
 	coordinator := NewIdempotencyCoordinator(repo, DefaultIdempotencyConfig())
 	SetDefaultIdempotencyCoordinator(coordinator)
@@ -112,6 +144,9 @@ func TestOpenAIResponsesTurnCoordinator_IgnoresTransportAndCohortDriftInFingerpr
 	require.Nil(t, duplicate)
 
 	strongDesc := desc
+	strongDesc.PromptCacheKey = "prompt-cache-key-transport-drift-v2"
+	strongDesc.Model = "gpt-5.4-codex"
+	strongDesc.Stream = false
 	strongDesc.RequestedTransport = string(OpenAIUpstreamTransportResponsesWebsocketV2)
 	strongDesc.RequestedCohort = string(OpenAIContinuationCohortStrong)
 	secondTicket, duplicate, err := svc.BeginOpenAIResponsesTurn(ctx, 12, "turn-key-drift", strongDesc)
@@ -119,4 +154,48 @@ func TestOpenAIResponsesTurnCoordinator_IgnoresTransportAndCohortDriftInFingerpr
 	require.Nil(t, secondTicket)
 	require.NotNil(t, duplicate)
 	require.Equal(t, string(OpenAIResponsesTurnPhaseProcessing), duplicate.Phase)
+}
+
+func TestOpenAIResponsesTurnCoordinator_FallsBackToMemoryStoreWhenPrimaryUnavailable(t *testing.T) {
+	resetOpenAIWSContinuationStatsForTest()
+	coordinator := NewIdempotencyCoordinator(failingOpenAIResponsesTurnRepo{}, DefaultIdempotencyConfig())
+	SetDefaultIdempotencyCoordinator(coordinator)
+	t.Cleanup(func() {
+		SetDefaultIdempotencyCoordinator(nil)
+		resetOpenAIWSContinuationStatsForTest()
+	})
+
+	svc := &OpenAIGatewayService{}
+	ctx := context.Background()
+	desc := OpenAIResponsesTurnDescriptor{
+		SessionHash:        "session-fallback-1",
+		PromptCacheKey:     "prompt-cache-fallback-1",
+		Model:              "gpt-5.4",
+		ClientRequestID:    "client-fallback-1",
+		PayloadFingerprint: BuildOpenAIResponsesTurnPayloadFingerprint([]byte(`{"input":"hello fallback"}`)),
+		Stream:             true,
+		TurnOrdinal:        1,
+	}
+
+	ticket, duplicate, err := svc.BeginOpenAIResponsesTurn(ctx, 21, "turn-key-fallback-1", desc)
+	require.NoError(t, err)
+	require.NotNil(t, ticket)
+	require.Nil(t, duplicate)
+	require.Equal(t, int64(1), OpenAIWSContinuationStats().TurnStoreFallbackTotal)
+
+	require.NoError(t, svc.MarkOpenAIResponsesTurnCompleted(ctx, ticket, OpenAIResponsesTurnStoredState{
+		Phase:           string(OpenAIResponsesTurnPhaseCompleted),
+		ResponseID:      "resp_fallback_1",
+		AccountID:       201,
+		Cohort:          string(OpenAIContinuationCohortStrong),
+		Transport:       string(OpenAIUpstreamTransportResponsesWebsocketV2),
+		ClientRequestID: "client-fallback-1",
+	}))
+
+	retryTicket, duplicate, err := svc.BeginOpenAIResponsesTurn(ctx, 21, "turn-key-fallback-1", desc)
+	require.NoError(t, err)
+	require.Nil(t, retryTicket)
+	require.NotNil(t, duplicate)
+	require.Equal(t, string(OpenAIResponsesTurnPhaseCompleted), duplicate.Phase)
+	require.Equal(t, "resp_fallback_1", duplicate.State.ResponseID)
 }

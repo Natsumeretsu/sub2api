@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,13 +61,20 @@ type OpenAIResponsesTurnTicket struct {
 	groupID  int64
 	turnKey  string
 	ttl      time.Duration
+	repo     IdempotencyRepository
 }
 
 type openAIResponsesTurnCoordinator struct {
 	repo              IdempotencyRepository
+	fallbackRepo      IdempotencyRepository
 	ttl               time.Duration
 	processingTimeout time.Duration
 }
+
+var (
+	openAIResponsesTurnFallbackRepoOnce sync.Once
+	openAIResponsesTurnFallbackRepo     IdempotencyRepository
+)
 
 func (s *OpenAIGatewayService) BeginOpenAIResponsesTurn(
 	ctx context.Context,
@@ -147,11 +156,15 @@ const (
 
 func newOpenAIResponsesTurnCoordinator() *openAIResponsesTurnCoordinator {
 	defaultCoordinator := DefaultIdempotencyCoordinator()
-	if defaultCoordinator == nil || defaultCoordinator.repo == nil {
+	if defaultCoordinator == nil {
 		return nil
 	}
+	openAIResponsesTurnFallbackRepoOnce.Do(func() {
+		openAIResponsesTurnFallbackRepo = NewMemoryIdempotencyRepository()
+	})
 	return &openAIResponsesTurnCoordinator{
 		repo:              defaultCoordinator.repo,
+		fallbackRepo:      openAIResponsesTurnFallbackRepo,
 		ttl:               openAIResponsesTurnTTL,
 		processingTimeout: maxDuration(defaultCoordinator.cfg.ProcessingTimeout, openAIResponsesTurnProcessingTimeout),
 	}
@@ -163,8 +176,26 @@ func (c *openAIResponsesTurnCoordinator) begin(
 	turnKey string,
 	desc OpenAIResponsesTurnDescriptor,
 ) (*OpenAIResponsesTurnTicket, *OpenAIResponsesTurnDuplicate, error) {
-	if c == nil || c.repo == nil {
+	ticket, duplicate, err := c.beginWithRepo(ctx, c.repo, groupID, turnKey, desc)
+	if err == nil || !errors.Is(err, ErrIdempotencyStoreUnavail) || c.fallbackRepo == nil || c.fallbackRepo == c.repo {
+		return ticket, duplicate, err
+	}
+	RecordOpenAIWSContinuationTurnStoreFallback()
+	return c.beginWithRepo(ctx, c.fallbackRepo, groupID, turnKey, desc)
+}
+
+func (c *openAIResponsesTurnCoordinator) beginWithRepo(
+	ctx context.Context,
+	repo IdempotencyRepository,
+	groupID int64,
+	turnKey string,
+	desc OpenAIResponsesTurnDescriptor,
+) (*OpenAIResponsesTurnTicket, *OpenAIResponsesTurnDuplicate, error) {
+	if c == nil {
 		return &OpenAIResponsesTurnTicket{}, nil, nil
+	}
+	if repo == nil {
+		return nil, nil, ErrIdempotencyStoreUnavail
 	}
 	key, err := NormalizeIdempotencyKey(turnKey)
 	if err != nil {
@@ -193,7 +224,7 @@ func (c *openAIResponsesTurnCoordinator) begin(
 		ExpiresAt:          expiresAt,
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		owner, createErr := c.repo.CreateProcessing(ctx, record)
+		owner, createErr := repo.CreateProcessing(ctx, record)
 		if createErr != nil {
 			return nil, nil, ErrIdempotencyStoreUnavail.WithCause(createErr)
 		}
@@ -203,10 +234,11 @@ func (c *openAIResponsesTurnCoordinator) begin(
 				groupID:  groupID,
 				turnKey:  key,
 				ttl:      c.ttl,
+				repo:     repo,
 			}, nil, nil
 		}
 
-		existing, getErr := c.repo.GetByScopeAndKeyHash(ctx, scope, keyHash)
+		existing, getErr := repo.GetByScopeAndKeyHash(ctx, scope, keyHash)
 		if getErr != nil {
 			return nil, nil, ErrIdempotencyStoreUnavail.WithCause(getErr)
 		}
@@ -217,7 +249,7 @@ func (c *openAIResponsesTurnCoordinator) begin(
 			return nil, nil, ErrIdempotencyKeyConflict
 		}
 		if !existing.ExpiresAt.After(now) {
-			taken, reclaimErr := c.repo.TryReclaim(ctx, existing.ID, existing.Status, now, lockedUntil, expiresAt)
+			taken, reclaimErr := repo.TryReclaim(ctx, existing.ID, existing.Status, now, lockedUntil, expiresAt)
 			if reclaimErr != nil {
 				return nil, nil, ErrIdempotencyStoreUnavail.WithCause(reclaimErr)
 			}
@@ -228,6 +260,7 @@ func (c *openAIResponsesTurnCoordinator) begin(
 					groupID:  groupID,
 					turnKey:  key,
 					ttl:      c.ttl,
+					repo:     repo,
 				}, nil, nil
 			}
 			continue
@@ -241,7 +274,7 @@ func (c *openAIResponsesTurnCoordinator) begin(
 					RetryAfterSecond: retryAfterSeconds(existing.LockedUntil, now),
 				}, nil
 			}
-			taken, reclaimErr := c.repo.TryReclaim(ctx, existing.ID, existing.Status, now, lockedUntil, expiresAt)
+			taken, reclaimErr := repo.TryReclaim(ctx, existing.ID, existing.Status, now, lockedUntil, expiresAt)
 			if reclaimErr != nil {
 				return nil, nil, ErrIdempotencyStoreUnavail.WithCause(reclaimErr)
 			}
@@ -252,6 +285,7 @@ func (c *openAIResponsesTurnCoordinator) begin(
 					groupID:  groupID,
 					turnKey:  key,
 					ttl:      c.ttl,
+					repo:     repo,
 				}, nil, nil
 			}
 		case IdempotencyStatusFailedRetryable:
@@ -261,7 +295,7 @@ func (c *openAIResponsesTurnCoordinator) begin(
 					RetryAfterSecond: retryAfterSeconds(existing.LockedUntil, now),
 				}, nil
 			}
-			taken, reclaimErr := c.repo.TryReclaim(ctx, existing.ID, IdempotencyStatusFailedRetryable, now, lockedUntil, expiresAt)
+			taken, reclaimErr := repo.TryReclaim(ctx, existing.ID, IdempotencyStatusFailedRetryable, now, lockedUntil, expiresAt)
 			if reclaimErr != nil {
 				return nil, nil, ErrIdempotencyStoreUnavail.WithCause(reclaimErr)
 			}
@@ -272,6 +306,7 @@ func (c *openAIResponsesTurnCoordinator) begin(
 					groupID:  groupID,
 					turnKey:  key,
 					ttl:      c.ttl,
+					repo:     repo,
 				}, nil, nil
 			}
 		case IdempotencyStatusSucceeded:
@@ -291,14 +326,21 @@ func (c *openAIResponsesTurnCoordinator) begin(
 }
 
 func (c *openAIResponsesTurnCoordinator) markRetryable(ctx context.Context, ticket *OpenAIResponsesTurnTicket, reason string) error {
-	if c == nil || c.repo == nil || ticket == nil || ticket.recordID <= 0 {
+	if c == nil || ticket == nil || ticket.recordID <= 0 {
+		return nil
+	}
+	repo := ticket.repo
+	if repo == nil {
+		repo = c.repo
+	}
+	if repo == nil {
 		return nil
 	}
 	if strings.TrimSpace(reason) == "" {
 		reason = "OPENAI_TURN_RETRYABLE"
 	}
 	expiresAt := time.Now().Add(ticket.ttl)
-	return c.repo.MarkFailedRetryable(ctx, ticket.recordID, reason, time.Now(), expiresAt)
+	return repo.MarkFailedRetryable(ctx, ticket.recordID, reason, time.Now(), expiresAt)
 }
 
 func (c *openAIResponsesTurnCoordinator) markTerminal(
@@ -307,7 +349,14 @@ func (c *openAIResponsesTurnCoordinator) markTerminal(
 	state OpenAIResponsesTurnStoredState,
 	responseStatus int,
 ) error {
-	if c == nil || c.repo == nil || ticket == nil || ticket.recordID <= 0 {
+	if c == nil || ticket == nil || ticket.recordID <= 0 {
+		return nil
+	}
+	repo := ticket.repo
+	if repo == nil {
+		repo = c.repo
+	}
+	if repo == nil {
 		return nil
 	}
 	if strings.TrimSpace(state.Phase) == "" {
@@ -318,7 +367,7 @@ func (c *openAIResponsesTurnCoordinator) markTerminal(
 		return err
 	}
 	expiresAt := time.Now().Add(ticket.ttl)
-	return c.repo.MarkSucceeded(ctx, ticket.recordID, responseStatus, string(stored), expiresAt)
+	return repo.MarkSucceeded(ctx, ticket.recordID, responseStatus, string(stored), expiresAt)
 }
 
 func decodeOpenAIResponsesTurnStoredState(stored *string) (OpenAIResponsesTurnStoredState, error) {
@@ -342,9 +391,9 @@ func buildOpenAIResponsesTurnActorScope(groupID int64, desc OpenAIResponsesTurnD
 }
 
 func openAIResponsesTurnFingerprintDescriptor(desc OpenAIResponsesTurnDescriptor) OpenAIResponsesTurnDescriptor {
-	desc.RequestedTransport = ""
-	desc.RequestedCohort = ""
-	return desc
+	return OpenAIResponsesTurnDescriptor{
+		PayloadFingerprint: strings.TrimSpace(desc.PayloadFingerprint),
+	}
 }
 
 func retryAfterSeconds(lockedUntil *time.Time, now time.Time) int {

@@ -732,6 +732,39 @@ func TestOpenAIHandleResponsesTurnBeginError_KeyConflictReturns409(t *testing.T)
 	require.Contains(t, w.Body.String(), "Same turn key was reused with a different payload")
 }
 
+func TestOpenAIHandleResponsesTurnBeginError_StoreUnavailableReturns503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+
+	h := &OpenAIGatewayHandler{}
+	h.handleOpenAIResponsesTurnBeginError(c, service.ErrIdempotencyStoreUnavail, false)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Equal(t, "application/json; charset=utf-8", w.Header().Get("Content-Type"))
+	require.Contains(t, w.Body.String(), "Turn idempotency store unavailable")
+}
+
+func TestOpenAIHandleResponsesTurnReuseConflict_EmittedReturns409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+
+	h := &OpenAIGatewayHandler{}
+	h.handleOpenAIResponsesTurnReuseConflict(c, &service.OpenAIResponsesTurnDuplicate{
+		Phase:            string(service.OpenAIResponsesTurnPhaseEmitted),
+		RetryAfterSecond: 7,
+	})
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Equal(t, "7", w.Header().Get("Retry-After"))
+	require.Contains(t, w.Body.String(), "Same turn already emitted downstream; gateway blocked silent replay to avoid duplicate answers")
+}
+
 func TestOpenAIShouldForceCacheBillingForSelectedAccount(t *testing.T) {
 	anchor := service.OpenAIWSContinuationAnchor{
 		StickyAccountID: 42,
