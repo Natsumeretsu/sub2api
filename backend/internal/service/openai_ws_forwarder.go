@@ -2886,11 +2886,41 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					expectedPrevForRecovery != "" &&
 					turnPreviousResponseID != "" &&
 					strings.TrimSpace(turnPreviousResponseID) != expectedPrevForRecovery
+				failClosedFunctionCallOutputPrevNotFound := fallbackReason == openAIWSIngressStagePreviousResponseNotFound &&
+					turnHasFunctionCallOutput &&
+					turnPreviousResponseID != "" &&
+					expectedPrevForRecovery == "" &&
+					s.openAIWSIngressPreviousResponseRecoveryEnabled() &&
+					!wroteDownstream
 				recoverablePrevNotFound := fallbackReason == openAIWSIngressStagePreviousResponseNotFound &&
 					turnPreviousResponseID != "" &&
 					s.openAIWSIngressPreviousResponseRecoveryEnabled() &&
 					!wroteDownstream &&
 					(!turnHasFunctionCallOutput || recoverableFunctionCallOutputPrevNotFound)
+				if failClosedFunctionCallOutputPrevNotFound {
+					logOpenAIWSModeInfo(
+						"ingress_ws_prev_response_fail_closed account_id=%d turn=%d conn_id=%s idx=%d reason=missing_local_anchor code=%s type=%s message=%s previous_response_id=%s previous_response_id_kind=%s has_function_call_output=%v response_id=%s store_disabled=%v has_prompt_cache_key=%v",
+						account.ID,
+						turn,
+						truncateOpenAIWSLogValue(lease.ConnID(), openAIWSIDValueMaxLen),
+						eventCount,
+						errCode,
+						errType,
+						errMessage,
+						truncateOpenAIWSLogValue(turnPreviousResponseID, openAIWSIDValueMaxLen),
+						normalizeOpenAIWSLogValue(turnPreviousResponseIDKind),
+						turnHasFunctionCallOutput,
+						truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
+						turnStoreDisabled,
+						turnPromptCacheKey != "",
+					)
+					markBrokenIngressLease(lease, openAIWSIngressStagePreviousResponseNotFound)
+					return nil, NewOpenAIWSClientCloseError(
+						coderws.StatusPolicyViolation,
+						"function_call_output previous_response_id cannot be recovered without a local continuation anchor; please restart the conversation",
+						nil,
+					)
+				}
 				if recoverablePrevNotFound {
 					// 可恢复场景使用非 error 关键字日志，避免被 LegacyPrintf 误判为 ERROR 级别。
 					logOpenAIWSModeInfo(
@@ -3487,6 +3517,22 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 							sessionHash,
 							lastTurnResponseID,
 						)
+						if hasFunctionCallOutput && expectedPrevForPingRecovery == "" {
+							logOpenAIWSModeInfo(
+								"ingress_ws_preflight_ping_recovery_fail_closed account_id=%d turn=%d conn_id=%s reason=missing_local_anchor previous_response_id=%s has_function_call_output=%v",
+								account.ID,
+								turn,
+								truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+								truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+								hasFunctionCallOutput,
+							)
+							resetSessionLease(true)
+							return NewOpenAIWSClientCloseError(
+								coderws.StatusPolicyViolation,
+								"function_call_output previous_response_id cannot be recovered without a local continuation anchor; please restart the conversation",
+								pingErr,
+							)
+						}
 						if hasFunctionCallOutput &&
 							expectedPrevForPingRecovery != "" &&
 							currentPreviousResponseID != expectedPrevForPingRecovery {
