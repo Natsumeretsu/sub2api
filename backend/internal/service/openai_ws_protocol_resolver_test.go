@@ -122,6 +122,20 @@ func TestOpenAIWSProtocolResolver_Resolve(t *testing.T) {
 		require.Equal(t, "apikey_disabled", decision.Reason)
 	})
 
+	t.Run("API Key账号未显式声明真实WS能力时回退HTTP", func(t *testing.T) {
+		account := &Account{
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Extra: map[string]any{
+				"openai_apikey_responses_websockets_v2_enabled": true,
+				"openai_apikey_responses_websockets_v2_mode":    OpenAIWSIngressModePassthrough,
+			},
+		}
+		decision := NewOpenAIWSProtocolResolver(baseCfg).Resolve(account)
+		require.Equal(t, OpenAIUpstreamTransportHTTPSSE, decision.Transport)
+		require.Equal(t, "apikey_ws_transport_unverified", decision.Reason)
+	})
+
 	t.Run("未知认证类型回退HTTP", func(t *testing.T) {
 		account := &Account{
 			Platform: PlatformOpenAI,
@@ -179,6 +193,23 @@ func TestOpenAIWSProtocolResolver_Resolve_ModeRouterV2(t *testing.T) {
 			Platform:    PlatformOpenAI,
 			Type:        AccountTypeAPIKey,
 			Concurrency: 1,
+			Extra: map[string]any{
+				"openai_apikey_responses_websockets_v2_enabled": true,
+			},
+		}
+		decision := NewOpenAIWSProtocolResolver(cfg).Resolve(legacyAccount)
+		require.Equal(t, OpenAIUpstreamTransportHTTPSSE, decision.Transport)
+		require.Equal(t, "apikey_ws_transport_unverified", decision.Reason)
+	})
+
+	t.Run("apikey account with explicit websocket capability can route to ws v2", func(t *testing.T) {
+		legacyAccount := &Account{
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Concurrency: 1,
+			Credentials: map[string]any{
+				"responses_websockets_v2_supported": true,
+			},
 			Extra: map[string]any{
 				"openai_apikey_responses_websockets_v2_enabled": true,
 			},

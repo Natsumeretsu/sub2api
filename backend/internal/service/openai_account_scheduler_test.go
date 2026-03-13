@@ -955,6 +955,9 @@ func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,
+		Credentials: map[string]any{
+			"responses_websockets_v2_supported": true,
+		},
 		Extra: map[string]any{
 			"openai_apikey_responses_websockets_v2_enabled": true,
 		},
@@ -974,6 +977,9 @@ func TestDefaultOpenAIAccountScheduler_Select_PrefersStrongCohortBeforeDegraded(
 		Schedulable: true,
 		Concurrency: 1,
 		Priority:    0,
+		Credentials: map[string]any{
+			"responses_websockets_v2_supported": true,
+		},
 		Extra: map[string]any{
 			"openai_apikey_responses_websockets_v2_enabled": true,
 		},

@@ -157,3 +157,46 @@ func TestSupportsOpenAIResponsesCompact(t *testing.T) {
 		require.True(t, account.SupportsOpenAIResponsesCompact())
 	})
 }
+
+func TestSupportsOpenAIResponsesWebSocketTransport(t *testing.T) {
+	t.Run("oauth accounts support websocket transport by default", func(t *testing.T) {
+		account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI}
+		require.True(t, account.SupportsOpenAIResponsesWebSocketTransport())
+	})
+
+	t.Run("apikey accounts require explicit opt in", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{
+				"base_url": "https://codex-api.packycode.com/v1",
+			},
+			Extra: map[string]any{
+				"openai_apikey_responses_websockets_v2_enabled": true,
+			},
+		}
+		require.False(t, account.SupportsOpenAIResponsesWebSocketTransport())
+	})
+
+	t.Run("apikey accounts honor explicit credential capability", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{
+				"responses_websockets_v2_supported": true,
+			},
+		}
+		require.True(t, account.SupportsOpenAIResponsesWebSocketTransport())
+	})
+
+	t.Run("apikey accounts honor explicit extra capability", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Extra: map[string]any{
+				"openai_apikey_responses_websockets_v2_supported": "true",
+			},
+		}
+		require.True(t, account.SupportsOpenAIResponsesWebSocketTransport())
+	})
+}

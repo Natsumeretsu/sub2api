@@ -77,6 +77,9 @@ func (r *defaultOpenAIWSProtocolResolver) Resolve(account *Account) OpenAIWSProt
 		default:
 			return openAIWSHTTPDecision("account_mode_off")
 		}
+		if account.IsOpenAIApiKey() && !account.SupportsOpenAIResponsesWebSocketTransport() {
+			return openAIWSHTTPDecision("apikey_ws_transport_unverified")
+		}
 		if account.Concurrency <= 0 {
 			return openAIWSHTTPDecision("account_concurrency_invalid")
 		}
@@ -96,6 +99,9 @@ func (r *defaultOpenAIWSProtocolResolver) Resolve(account *Account) OpenAIWSProt
 	}
 	if !account.IsOpenAIResponsesWebSocketV2Enabled() {
 		return openAIWSHTTPDecision("account_disabled")
+	}
+	if account.IsOpenAIApiKey() && !account.SupportsOpenAIResponsesWebSocketTransport() {
+		return openAIWSHTTPDecision("apikey_ws_transport_unverified")
 	}
 	if wsCfg.ResponsesWebsocketsV2 {
 		return OpenAIWSProtocolDecision{

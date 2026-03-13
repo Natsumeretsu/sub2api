@@ -809,6 +809,31 @@ func (a *Account) SupportsOpenAIResponsesCompact() bool {
 	return false
 }
 
+func (a *Account) SupportsOpenAIResponsesWebSocketTransport() bool {
+	if !a.IsOpenAI() {
+		return false
+	}
+	if a.IsOpenAIOAuth() {
+		return true
+	}
+	if !a.IsOpenAIApiKey() {
+		return false
+	}
+	for _, key := range []string{
+		"openai_apikey_responses_websockets_v2_supported",
+		"openai_responses_websockets_v2_supported",
+		"responses_websockets_v2_supported",
+	} {
+		if enabled, ok := a.getBoolCredential(key); ok {
+			return enabled
+		}
+		if enabled, ok := a.getBoolExtra(key); ok {
+			return enabled
+		}
+	}
+	return false
+}
+
 func (a *Account) GetOpenAIAccessToken() string {
 	if !a.IsOpenAI() {
 		return ""
@@ -849,6 +874,30 @@ func (a *Account) getBoolCredential(key string) (bool, bool) {
 		return false, false
 	}
 	raw, ok := a.Credentials[key]
+	if !ok || raw == nil {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return false, false
+		}
+		parsed, err := strconv.ParseBool(trimmed)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func (a *Account) getBoolExtra(key string) (bool, bool) {
+	if a == nil || a.Extra == nil {
+		return false, false
+	}
+	raw, ok := a.Extra[key]
 	if !ok || raw == nil {
 		return false, false
 	}
