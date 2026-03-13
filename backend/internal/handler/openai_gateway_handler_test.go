@@ -828,6 +828,71 @@ func TestOpenAIShouldBlockAnchoredCrossAccountFailover(t *testing.T) {
 	))
 }
 
+func TestOpenAIShouldBlockHTTPPreviousResponseFallback(t *testing.T) {
+	anchor := service.OpenAIWSContinuationAnchor{
+		FromSessionState: true,
+		StrongCohort:     true,
+	}
+	passthroughOAuth := &service.Account{
+		Type:     service.AccountTypeOAuth,
+		Platform: service.PlatformOpenAI,
+		Extra: map[string]any{
+			"openai_passthrough": true,
+		},
+	}
+	require.True(t, openAIShouldBlockHTTPPreviousResponseFallback(
+		anchor,
+		"resp_123",
+		passthroughOAuth,
+		service.OpenAIClientTransportHTTP,
+		false,
+	))
+
+	require.True(t, openAIShouldBlockHTTPPreviousResponseFallback(
+		anchor,
+		"",
+		passthroughOAuth,
+		service.OpenAIClientTransportHTTP,
+		false,
+	))
+
+	require.False(t, openAIShouldBlockHTTPPreviousResponseFallback(
+		service.OpenAIWSContinuationAnchor{},
+		"",
+		passthroughOAuth,
+		service.OpenAIClientTransportHTTP,
+		false,
+	))
+
+	require.False(t, openAIShouldBlockHTTPPreviousResponseFallback(
+		anchor,
+		"resp_123",
+		&service.Account{
+			Type:     service.AccountTypeOAuth,
+			Platform: service.PlatformOpenAI,
+			Extra:    map[string]any{},
+		},
+		service.OpenAIClientTransportHTTP,
+		false,
+	))
+
+	require.False(t, openAIShouldBlockHTTPPreviousResponseFallback(
+		anchor,
+		"resp_123",
+		passthroughOAuth,
+		service.OpenAIClientTransportWS,
+		false,
+	))
+
+	require.False(t, openAIShouldBlockHTTPPreviousResponseFallback(
+		anchor,
+		"resp_123",
+		passthroughOAuth,
+		service.OpenAIClientTransportHTTP,
+		true,
+	))
+}
+
 func TestOpenAIShouldForceCacheBillingAfterFailover(t *testing.T) {
 	require.False(t, openAIShouldForceCacheBillingAfterFailover(service.OpenAIWSContinuationAnchor{}, "", nil))
 	require.True(t, openAIShouldForceCacheBillingAfterFailover(

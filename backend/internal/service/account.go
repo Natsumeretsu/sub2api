@@ -4,6 +4,7 @@ package service
 import (
 	"encoding/json"
 	"hash/fnv"
+	"net/url"
 	"reflect"
 	"sort"
 	"strconv"
@@ -832,6 +833,61 @@ func (a *Account) SupportsOpenAIResponsesWebSocketTransport() bool {
 		}
 	}
 	return false
+}
+
+// SupportsOpenAIHTTPPreviousResponseID 返回账号在 HTTP /responses surface 上是否支持 previous_response_id。
+//
+// 设计原则：
+// 1. 显式 capability 声明优先于默认推断
+// 2. OAuth passthrough 默认按不支持处理，因为 live 上游已实锤会返回 Unsupported parameter
+// 3. 官方 OpenAI API Key surface（api.openai.com）默认支持
+// 4. 非官方 API Key base_url 默认按不支持处理，需显式声明后再放行
+func (a *Account) SupportsOpenAIHTTPPreviousResponseID() bool {
+	if !a.IsOpenAI() {
+		return false
+	}
+	for _, key := range a.openAIHTTPPreviousResponseCapabilityKeys() {
+		if enabled, ok := a.getBoolCredential(key); ok {
+			return enabled
+		}
+		if enabled, ok := a.getBoolExtra(key); ok {
+			return enabled
+		}
+	}
+	if a.IsOpenAIOAuth() {
+		return !a.IsOpenAIPassthroughEnabled()
+	}
+	if !a.IsOpenAIApiKey() {
+		return false
+	}
+	baseURL := strings.TrimSpace(a.GetOpenAIBaseURL())
+	if baseURL == "" {
+		return false
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(parsed.Hostname()), "api.openai.com")
+}
+
+func (a *Account) openAIHTTPPreviousResponseCapabilityKeys() []string {
+	keys := make([]string, 0, 5)
+	if a != nil {
+		switch {
+		case a.IsOpenAIOAuth():
+			keys = append(keys, "openai_oauth_http_previous_response_id_supported")
+		case a.IsOpenAIApiKey():
+			keys = append(keys, "openai_apikey_http_previous_response_id_supported")
+		}
+	}
+	keys = append(keys,
+		"openai_http_previous_response_id_supported",
+		"openai_responses_http_previous_response_id_supported",
+		"responses_http_previous_response_id_supported",
+		"http_previous_response_id_supported",
+	)
+	return keys
 }
 
 func (a *Account) GetOpenAIAccessToken() string {

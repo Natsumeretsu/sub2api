@@ -13,6 +13,7 @@ type OpenAIWSContinuationStatsSnapshot struct {
 	TurnStoreFallbackTotal                    int64 `json:"turn_store_fallback_total"`
 	WSToHTTPMidSessionTotal                   int64 `json:"ws_to_http_mid_session_total"`
 	PreviousResponseRecoveredFromSessionTotal int64 `json:"previous_response_recovered_from_session_total"`
+	HTTPPreviousResponseUnsupportedTotal      int64 `json:"http_previous_response_unsupported_total"`
 	PreviousResponseStrippedMidSessionTotal   int64 `json:"previous_response_stripped_mid_session_total"`
 	AccountSwitchWithCacheDropTotal           int64 `json:"account_switch_with_cache_drop_total"`
 	AnchoredCrossAccountSwitchBlockedTotal    int64 `json:"anchored_cross_account_switch_blocked_total"`
@@ -43,6 +44,7 @@ var (
 	openAIWSContinuationTurnStoreFallbackTotal                    atomic.Int64
 	openAIWSContinuationWSToHTTPMidSessionTotal                   atomic.Int64
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal atomic.Int64
+	openAIWSContinuationHTTPPreviousResponseUnsupportedTotal      atomic.Int64
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal   atomic.Int64
 	openAIWSContinuationAccountSwitchWithCacheDropTotal           atomic.Int64
 	openAIWSContinuationAnchoredCrossAccountSwitchBlockedTotal    atomic.Int64
@@ -74,6 +76,7 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 		TurnStoreFallbackTotal:                    openAIWSContinuationTurnStoreFallbackTotal.Load(),
 		WSToHTTPMidSessionTotal:                   openAIWSContinuationWSToHTTPMidSessionTotal.Load(),
 		PreviousResponseRecoveredFromSessionTotal: openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Load(),
+		HTTPPreviousResponseUnsupportedTotal:      openAIWSContinuationHTTPPreviousResponseUnsupportedTotal.Load(),
 		PreviousResponseStrippedMidSessionTotal:   openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Load(),
 		AccountSwitchWithCacheDropTotal:           openAIWSContinuationAccountSwitchWithCacheDropTotal.Load(),
 		AnchoredCrossAccountSwitchBlockedTotal:    openAIWSContinuationAnchoredCrossAccountSwitchBlockedTotal.Load(),
@@ -126,6 +129,10 @@ func RecordOpenAIWSContinuationTurnStoreFallback() {
 
 func RecordOpenAIWSContinuationPreviousResponseRecoveredFromSession() {
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Add(1)
+}
+
+func RecordOpenAIWSContinuationHTTPPreviousResponseUnsupported() {
+	openAIWSContinuationHTTPPreviousResponseUnsupportedTotal.Add(1)
 }
 
 func RecordOpenAIWSContinuationPreviousResponseStrippedMidSession() {
@@ -221,6 +228,7 @@ func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationTurnStoreFallbackTotal.Store(0)
 	openAIWSContinuationWSToHTTPMidSessionTotal.Store(0)
 	openAIWSContinuationPreviousResponseRecoveredFromSessionTotal.Store(0)
+	openAIWSContinuationHTTPPreviousResponseUnsupportedTotal.Store(0)
 	openAIWSContinuationPreviousResponseStrippedMidSessionTotal.Store(0)
 	openAIWSContinuationAccountSwitchWithCacheDropTotal.Store(0)
 	openAIWSContinuationAnchoredCrossAccountSwitchBlockedTotal.Store(0)

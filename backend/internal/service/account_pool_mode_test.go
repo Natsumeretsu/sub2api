@@ -200,3 +200,73 @@ func TestSupportsOpenAIResponsesWebSocketTransport(t *testing.T) {
 		require.True(t, account.SupportsOpenAIResponsesWebSocketTransport())
 	})
 }
+
+func TestSupportsOpenAIHTTPPreviousResponseID(t *testing.T) {
+	t.Run("oauth passthrough accounts default to unsupported", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeOAuth,
+			Platform: PlatformOpenAI,
+			Extra: map[string]any{
+				"openai_passthrough": true,
+			},
+		}
+		require.False(t, account.SupportsOpenAIHTTPPreviousResponseID())
+	})
+
+	t.Run("oauth non passthrough accounts default to supported", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeOAuth,
+			Platform: PlatformOpenAI,
+			Extra:    map[string]any{},
+		}
+		require.True(t, account.SupportsOpenAIHTTPPreviousResponseID())
+	})
+
+	t.Run("oauth explicit capability overrides passthrough default", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeOAuth,
+			Platform: PlatformOpenAI,
+			Extra: map[string]any{
+				"openai_passthrough": true,
+				"openai_oauth_http_previous_response_id_supported": true,
+			},
+		}
+		require.True(t, account.SupportsOpenAIHTTPPreviousResponseID())
+	})
+
+	t.Run("official api key surface supports previous_response_id by default", func(t *testing.T) {
+		account := &Account{
+			Type:        AccountTypeAPIKey,
+			Platform:    PlatformOpenAI,
+			Credentials: map[string]any{"api_key": "sk-test"},
+		}
+		require.True(t, account.SupportsOpenAIHTTPPreviousResponseID())
+	})
+
+	t.Run("custom api key surface defaults to unsupported", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{
+				"api_key":  "sk-test",
+				"base_url": "https://codex-api.packycode.com/v1",
+			},
+		}
+		require.False(t, account.SupportsOpenAIHTTPPreviousResponseID())
+	})
+
+	t.Run("custom api key surface honors explicit capability", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Credentials: map[string]any{
+				"api_key":  "sk-test",
+				"base_url": "https://codex-api.packycode.com/v1",
+			},
+			Extra: map[string]any{
+				"openai_apikey_http_previous_response_id_supported": true,
+			},
+		}
+		require.True(t, account.SupportsOpenAIHTTPPreviousResponseID())
+	})
+}

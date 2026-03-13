@@ -439,6 +439,32 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			)
 			continue
 		}
+		if openAIShouldBlockHTTPPreviousResponseFallback(
+			anchor,
+			previousResponseID,
+			account,
+			service.GetOpenAIClientTransport(c),
+			isOpenAIRemoteCompactPath(c),
+		) {
+			service.RecordOpenAIWSContinuationHTTPPreviousResponseUnsupported()
+			reqLog.Warn("openai.http_previous_response_surface_unsupported",
+				zap.Int64("account_id", account.ID),
+				zap.String("account_name", account.Name),
+				zap.String("account_type", account.Type),
+				zap.String("base_url", account.GetOpenAIBaseURL()),
+				zap.Bool("openai_passthrough", account.IsOpenAIPassthroughEnabled()),
+				zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+				zap.Bool("has_previous_response_id", strings.TrimSpace(previousResponseID) != ""),
+			)
+			h.handleStreamingAwareError(
+				c,
+				http.StatusServiceUnavailable,
+				"api_error",
+				openAIHTTPPreviousResponseUnsupportedMessage(),
+				streamStarted,
+			)
+			return
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
@@ -1861,6 +1887,10 @@ func openAIAnchoredCrossAccountBlockedMessage() string {
 	return "Strong continuation anchor belongs to another upstream account; retry later to preserve session continuity and cache affinity"
 }
 
+func openAIHTTPPreviousResponseUnsupportedMessage() string {
+	return "Strong continuation is temporarily unavailable on the selected HTTP fallback surface; retry later to preserve session continuity and cache affinity"
+}
+
 func openAIShouldForceCacheBillingForSelectedAccount(anchor service.OpenAIWSContinuationAnchor, previousResponseID string, selectedAccountID int64) bool {
 	if !openAIHasContinuationAnchor(anchor, previousResponseID) {
 		return false
@@ -1891,6 +1921,25 @@ func openAIShouldBlockAnchoredCrossAccountSelection(
 
 func openAIShouldBlockAnchoredCrossAccountFailover(anchor service.OpenAIWSContinuationAnchor, previousResponseID string) bool {
 	return openAIHasResponseBoundContinuation(anchor, previousResponseID)
+}
+
+func openAIShouldBlockHTTPPreviousResponseFallback(
+	anchor service.OpenAIWSContinuationAnchor,
+	previousResponseID string,
+	account *service.Account,
+	clientTransport service.OpenAIClientTransport,
+	remoteCompact bool,
+) bool {
+	if remoteCompact || account == nil {
+		return false
+	}
+	if clientTransport != service.OpenAIClientTransportHTTP {
+		return false
+	}
+	if !openAIHasResponseBoundContinuation(anchor, previousResponseID) {
+		return false
+	}
+	return !account.SupportsOpenAIHTTPPreviousResponseID()
 }
 
 func openAIShouldForceCacheBillingAfterFailover(
