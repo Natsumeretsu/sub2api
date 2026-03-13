@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	coderws "github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -78,6 +79,28 @@ func TestOpenAIWSIngressPreviousResponseRecoveryEnabled(t *testing.T) {
 
 	svc.cfg.Gateway.OpenAIWS.IngressPreviousResponseRecoveryEnabled = true
 	require.True(t, svc.openAIWSIngressPreviousResponseRecoveryEnabled())
+}
+
+func TestOpenAIWSIngressTurnDescriptorClientRequestID_UsesOnlyProvidedHeader(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "creq-turn-1")
+	ctx = context.WithValue(ctx, ctxkey.ClientRequestIDProvided, true)
+	require.Equal(t, "creq-turn-1", openAIWSIngressTurnDescriptorClientRequestID(ctx))
+
+	generatedCtx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "generated-creq-1")
+	generatedCtx = context.WithValue(generatedCtx, ctxkey.ClientRequestIDProvided, false)
+	require.Empty(t, openAIWSIngressTurnDescriptorClientRequestID(generatedCtx))
+}
+
+func TestOpenAIWSIngressTurnBeginError_KeyConflictReturnsPolicyViolation(t *testing.T) {
+	t.Parallel()
+
+	err := openAIWSIngressTurnBeginError(ErrIdempotencyKeyConflict)
+	var closeErr *OpenAIWSClientCloseError
+	require.ErrorAs(t, err, &closeErr)
+	require.Equal(t, coderws.StatusPolicyViolation, closeErr.statusCode)
+	require.Contains(t, closeErr.reason, "same websocket turn key was reused with a different payload")
 }
 
 func TestDropPreviousResponseIDFromRawPayload(t *testing.T) {

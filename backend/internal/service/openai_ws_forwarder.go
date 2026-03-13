@@ -188,6 +188,13 @@ func openAIWSIngressClientRequestIDProvided(ctx context.Context) bool {
 	return false
 }
 
+func openAIWSIngressTurnDescriptorClientRequestID(ctx context.Context) string {
+	if !openAIWSIngressClientRequestIDProvided(ctx) {
+		return ""
+	}
+	return openAIWSIngressClientRequestID(ctx)
+}
+
 func openAIWSIngressTurnRetryReason(err error) string {
 	var turnErr *openAIWSIngressTurnError
 	if !errors.As(err, &turnErr) || turnErr == nil {
@@ -219,6 +226,28 @@ func openAIWSIngressTurnKey(ctx context.Context, sessionHash string, turn int, p
 		return "derived:" + derived
 	}
 	return "generated:" + clientRequestID + "#turn=" + strconv.Itoa(turn) + ":" + derived
+}
+
+func openAIWSIngressTurnBeginError(beginErr error) error {
+	if beginErr == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(beginErr, ErrIdempotencyKeyConflict):
+		return NewOpenAIWSClientCloseError(
+			coderws.StatusPolicyViolation,
+			"same websocket turn key was reused with a different payload; retry with the same client_request_id or wait for a new turn",
+			nil,
+		)
+	case errors.Is(beginErr, ErrIdempotencyStoreUnavail):
+		return NewOpenAIWSClientCloseError(
+			coderws.StatusTryAgainLater,
+			"websocket turn idempotency store unavailable; retry later",
+			nil,
+		)
+	default:
+		return beginErr
+	}
 }
 
 func isOpenAIWSIngressPreviousResponseNotFound(err error) bool {
@@ -3541,7 +3570,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					SessionHash:        sessionHash,
 					PromptCacheKey:     strings.TrimSpace(openAIWSPayloadStringFromRaw(currentPayload, "prompt_cache_key")),
 					Model:              currentOriginalModel,
-					ClientRequestID:    openAIWSIngressClientRequestID(ctx),
+					ClientRequestID:    openAIWSIngressTurnDescriptorClientRequestID(ctx),
 					RequestedTransport: string(OpenAIUpstreamTransportResponsesWebsocketV2),
 					RequestedCohort:    string(OpenAIContinuationCohortStrong),
 					PayloadFingerprint: BuildOpenAIResponsesTurnPayloadFingerprint(currentPayload),
@@ -3550,7 +3579,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				},
 			)
 			if beginErr != nil {
-				return beginErr
+				return openAIWSIngressTurnBeginError(beginErr)
 			}
 			if duplicateTurn != nil {
 				RecordOpenAIWSContinuationTurnReuseConflict(duplicateTurn.Phase)

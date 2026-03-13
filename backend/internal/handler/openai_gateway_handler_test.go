@@ -667,6 +667,49 @@ func TestOpenAIResponsesTurnKey_DerivesStableFallbackWhenClientRequestIDIsGatewa
 	require.True(t, strings.HasPrefix(first, "derived:"))
 }
 
+func TestOpenAIResponsesTurnDescriptorClientRequestID_UsesOnlyProvidedHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("provided_header_is_kept", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+		reqCtx := context.WithValue(req.Context(), ctxkey.ClientRequestID, "creq-turn-1")
+		reqCtx = context.WithValue(reqCtx, ctxkey.ClientRequestIDProvided, true)
+		req = req.WithContext(reqCtx)
+		c.Request = req
+
+		require.Equal(t, "creq-turn-1", openAIResponsesTurnDescriptorClientRequestID(c))
+	})
+
+	t.Run("gateway_generated_id_is_ignored", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+		reqCtx := context.WithValue(req.Context(), ctxkey.ClientRequestID, "generated-creq-1")
+		reqCtx = context.WithValue(reqCtx, ctxkey.ClientRequestIDProvided, false)
+		req = req.WithContext(reqCtx)
+		c.Request = req
+
+		require.Empty(t, openAIResponsesTurnDescriptorClientRequestID(c))
+	})
+}
+
+func TestOpenAIHandleResponsesTurnBeginError_KeyConflictReturns409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+
+	h := &OpenAIGatewayHandler{}
+	h.handleOpenAIResponsesTurnBeginError(c, service.ErrIdempotencyKeyConflict, false)
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Equal(t, "application/json; charset=utf-8", w.Header().Get("Content-Type"))
+	require.Contains(t, w.Body.String(), "Same turn key was reused with a different payload")
+}
+
 func TestOpenAIShouldForceCacheBillingForSelectedAccount(t *testing.T) {
 	anchor := service.OpenAIWSContinuationAnchor{
 		StickyAccountID: 42,

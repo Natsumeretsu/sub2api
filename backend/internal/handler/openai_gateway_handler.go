@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -232,7 +233,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			SessionHash:        sessionHash,
 			PromptCacheKey:     promptCacheKey,
 			Model:              reqModel,
-			ClientRequestID:    openAIResponsesClientRequestID(c),
+			ClientRequestID:    openAIResponsesTurnDescriptorClientRequestID(c),
 			RequestedTransport: string(requiredTransport),
 			RequestedCohort:    openAIResponsesRequiredCohort(requiredTransport),
 			PayloadFingerprint: service.BuildOpenAIResponsesTurnPayloadFingerprint(body),
@@ -247,7 +248,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		)
 		if beginErr != nil {
 			reqLog.Warn("openai.turn_begin_failed", zap.Error(beginErr), zap.String("turn_key", turnKey))
-			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Turn idempotency store unavailable", streamStarted)
+			h.handleOpenAIResponsesTurnBeginError(c, beginErr, streamStarted)
 			return
 		}
 		if duplicateTurn != nil {
@@ -1673,6 +1674,13 @@ func openAIResponsesClientRequestIDProvided(c *gin.Context) bool {
 	return false
 }
 
+func openAIResponsesTurnDescriptorClientRequestID(c *gin.Context) string {
+	if !openAIResponsesClientRequestIDProvided(c) {
+		return ""
+	}
+	return openAIResponsesClientRequestID(c)
+}
+
 func openAIResponsesTurnKey(c *gin.Context, sessionHash string, body []byte) string {
 	clientRequestID := openAIResponsesClientRequestID(c)
 	if clientRequestID == "" {
@@ -1749,6 +1757,37 @@ func (h *OpenAIGatewayHandler) handleOpenAIResponsesTurnReuseConflict(c *gin.Con
 		c.Header("Retry-After", strconv.Itoa(duplicate.RetryAfterSecond))
 	}
 	h.errorResponse(c, http.StatusConflict, "conflict_error", message)
+}
+
+func (h *OpenAIGatewayHandler) handleOpenAIResponsesTurnBeginError(c *gin.Context, beginErr error, streamStarted bool) {
+	if errors.Is(beginErr, service.ErrIdempotencyKeyConflict) {
+		h.handleStreamingAwareError(
+			c,
+			http.StatusConflict,
+			"conflict_error",
+			"Same turn key was reused with a different payload; retry with the same client_request_id or wait for a new turn",
+			streamStarted,
+		)
+		return
+	}
+	if errors.Is(beginErr, service.ErrIdempotencyStoreUnavail) {
+		h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Turn idempotency store unavailable", streamStarted)
+		return
+	}
+
+	statusCode := infraerrors.Code(beginErr)
+	if statusCode < http.StatusBadRequest {
+		statusCode = http.StatusBadRequest
+	}
+	errorType := "api_error"
+	if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
+		errorType = "invalid_request_error"
+	}
+	message := strings.TrimSpace(infraerrors.Message(beginErr))
+	if message == "" {
+		message = "Turn idempotency check failed"
+	}
+	h.handleStreamingAwareError(c, statusCode, errorType, message, streamStarted)
 }
 
 func (h *OpenAIGatewayHandler) handleOpenAIFailoverRetryBlockedAfterEmit(
