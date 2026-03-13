@@ -175,8 +175,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	// Generate session hash (header first; fallback to prompt_cache_key)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
+	remoteCompact := isOpenAIRemoteCompactPath(c)
 	anchor := h.gatewayService.ResolveOpenAIWSContinuationAnchor(c.Request.Context(), apiKey.GroupID, sessionHash, previousResponseID)
-	if previousResponseID == "" && anchor.FromSessionState && anchor.PreviousResponseID != "" {
+	if !remoteCompact && previousResponseID == "" && anchor.FromSessionState && anchor.PreviousResponseID != "" {
 		nextBody, setErr := sjson.SetBytes(body, "previous_response_id", anchor.PreviousResponseID)
 		if setErr != nil {
 			reqLog.Warn("openai.previous_response_recovery_failed", zap.Error(setErr))

@@ -1122,6 +1122,14 @@ func IsOpenAIContinuationStrongCohort(c *gin.Context) bool {
 	return strong
 }
 
+func isOpenAIRemoteCompactRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	normalizedPath := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
+	return strings.HasSuffix(normalizedPath, "/responses/compact")
+}
+
 func openAIRequestBodyTrimmedString(reqBody map[string]any, key string) string {
 	if len(reqBody) == 0 {
 		return ""
@@ -1953,7 +1961,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// 避免静默打断续链并放大输入 token；其余弱会话仍保持原有过滤行为。
 	if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 		if _, has := reqBody["previous_response_id"]; has {
-			if IsOpenAIContinuationStrongCohort(c) && GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP {
+			if isOpenAIRemoteCompactRequest(c) {
+				delete(reqBody, "previous_response_id")
+				bodyModified = true
+				markPatchDelete("previous_response_id")
+			} else if IsOpenAIContinuationStrongCohort(c) && GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP {
 				logOpenAIWSModeInfo(
 					"http_mid_session_previous_response_preserved account_id=%d transport=%s reason=strong_continuation_cohort previous_response_id_kind=%s",
 					account.ID,
