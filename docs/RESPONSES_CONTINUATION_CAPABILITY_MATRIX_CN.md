@@ -97,6 +97,7 @@
 - 回归测试验证
 - 运行时快速诊断
 - 提供一个只读 admin/debug surface：`GET /api/v1/admin/ops/runtime/continuation`
+  当前返回体已经包含 `counters`、`config`、`state` 三层，其中 `state` 会暴露本地 `session state / TTL / conn churn` 相关快照
 
 当前还**没有**承诺：
 
@@ -125,8 +126,8 @@
 
 ### Phase 2 下一步
 
-- 把当前计数接到更明确的 debug/admin surface
-- 增加 `session state / TTL / conn churn` 级别观测
+- 把当前观测接到更易读的 admin/runtime 页面或 dashboard，而不只是原始 JSON
+- 为 `state` 快照继续补充 TTL 命中率、连接回收与跨实例恢复相关指标
 
 ### Phase 3
 

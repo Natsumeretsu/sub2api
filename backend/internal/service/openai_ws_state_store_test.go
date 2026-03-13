@@ -125,6 +125,40 @@ func TestOpenAIWSStateStore_SessionConnTTL(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestOpenAIWSStateStore_DebugSnapshot(t *testing.T) {
+	raw := NewOpenAIWSStateStore(nil)
+	store, ok := raw.(*defaultOpenAIWSStateStore)
+	require.True(t, ok)
+
+	ctx := context.Background()
+	require.NoError(t, store.BindResponseAccount(ctx, 9, "resp_debug_1", 101, time.Minute))
+	store.BindResponseConn("resp_debug_1", "conn_debug_1", time.Minute)
+	store.BindSessionTurnState(9, "session_hash_debug", "turn_debug", time.Minute)
+	store.BindSessionLastResponse(9, "session_hash_debug", "resp_debug_1", time.Minute)
+	store.BindSessionConn(9, "session_hash_debug", "conn_debug_1", time.Minute)
+	store.DeleteSessionConn(9, "session_hash_debug")
+
+	snapshot := store.DebugSnapshot()
+	require.Equal(t, 1, snapshot.ResponseAccountLocalEntries)
+	require.Equal(t, 1, snapshot.ResponseConnEntries)
+	require.Equal(t, 1, snapshot.SessionTurnStateEntries)
+	require.Equal(t, 1, snapshot.SessionLastResponseEntries)
+	require.Equal(t, 0, snapshot.SessionConnEntries)
+	require.Equal(t, int64(1), snapshot.ResponseAccountBindTotal)
+	require.Equal(t, int64(1), snapshot.ResponseConnBindTotal)
+	require.Equal(t, int64(1), snapshot.SessionTurnStateBindTotal)
+	require.Equal(t, int64(1), snapshot.SessionLastResponseBindTotal)
+	require.Equal(t, int64(1), snapshot.SessionConnBindTotal)
+	require.Equal(t, int64(1), snapshot.SessionConnDeleteTotal)
+	require.False(t, snapshot.SessionTurnStatePersistent)
+	require.False(t, snapshot.SessionLastResponsePersistent)
+	require.False(t, snapshot.ResponseAccountPersistent)
+	require.Positive(t, snapshot.LocalCleanupIntervalSeconds)
+	require.Positive(t, snapshot.LocalCleanupMaxPerMap)
+	require.Positive(t, snapshot.LocalMaxEntriesPerMap)
+	require.Positive(t, snapshot.RedisTimeoutMillis)
+}
+
 func TestOpenAIWSStateStore_GetResponseAccount_NoStaleAfterCacheMiss(t *testing.T) {
 	cache := &stubGatewayCache{sessionBindings: map[string]int64{}}
 	store := NewOpenAIWSStateStore(cache)

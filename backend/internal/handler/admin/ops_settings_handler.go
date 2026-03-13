@@ -125,9 +125,15 @@ func (h *OpsHandler) GetRuntimeLogConfig(c *gin.Context) {
 // GetRuntimeContinuationStats returns lightweight process-local continuation stats.
 // GET /api/v1/admin/ops/runtime/continuation
 func (h *OpsHandler) GetRuntimeContinuationStats(c *gin.Context) {
+	openAIWS := service.OpenAIWSContinuationRuntimeSnapshot{
+		Counters: service.OpenAIWSContinuationStats(),
+	}
+	if h != nil && h.openAIGatewayService != nil {
+		openAIWS = h.openAIGatewayService.OpenAIWSContinuationRuntimeSnapshot()
+	}
 	response.Success(c, gin.H{
 		"source":    "process_local",
-		"openai_ws": service.OpenAIWSContinuationStats(),
+		"openai_ws": openAIWS,
 	})
 }
 

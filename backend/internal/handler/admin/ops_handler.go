@@ -16,7 +16,8 @@ import (
 )
 
 type OpsHandler struct {
-	opsService *service.OpsService
+	opsService           *service.OpsService
+	openAIGatewayService *service.OpenAIGatewayService
 }
 
 // GetErrorLogByID returns ops error log detail.
@@ -70,8 +71,15 @@ func parseOpsViewParam(c *gin.Context) string {
 	}
 }
 
-func NewOpsHandler(opsService *service.OpsService) *OpsHandler {
-	return &OpsHandler{opsService: opsService}
+func NewOpsHandler(opsService *service.OpsService, openAIGatewayServices ...*service.OpenAIGatewayService) *OpsHandler {
+	var openAIGatewayService *service.OpenAIGatewayService
+	if len(openAIGatewayServices) > 0 {
+		openAIGatewayService = openAIGatewayServices[0]
+	}
+	return &OpsHandler{
+		opsService:           opsService,
+		openAIGatewayService: openAIGatewayService,
+	}
 }
 
 // GetErrorLogs lists ops error logs.

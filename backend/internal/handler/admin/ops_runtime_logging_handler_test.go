@@ -116,8 +116,35 @@ func newRuntimeOpsService(t *testing.T) *service.OpsService {
 	return service.NewOpsService(nil, settingRepo, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
+func newRuntimeOpsHandler(t *testing.T) *OpsHandler {
+	t.Helper()
+	opsSvc := newRuntimeOpsService(t)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			OpenAIWS: config.GatewayOpenAIWSConfig{
+				Enabled:                                true,
+				ResponsesWebsockets:                    true,
+				ResponsesWebsocketsV2:                  true,
+				IngressPreviousResponseRecoveryEnabled: true,
+				StoreDisabledConnMode:                  "strict",
+				StoreDisabledForceNewConn:              true,
+				StickySessionTTLSeconds:                3600,
+				StickyResponseIDTTLSeconds:             3600,
+				StickyPreviousResponseTTLSeconds:       3600,
+				MaxConnsPerAccount:                     4,
+				MinIdlePerAccount:                      1,
+				MaxIdlePerAccount:                      2,
+				FallbackCooldownSeconds:                30,
+				RetryTotalBudgetMS:                     2500,
+			},
+		},
+	}
+	openAIGatewaySvc := service.NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil, nil)
+	return NewOpsHandler(opsSvc, openAIGatewaySvc)
+}
+
 func TestOpsRuntimeLoggingHandler_GetConfig(t *testing.T) {
-	h := NewOpsHandler(newRuntimeOpsService(t))
+	h := newRuntimeOpsHandler(t)
 	r := newOpsRuntimeRouter(h, false)
 
 	w := httptest.NewRecorder()
@@ -129,7 +156,7 @@ func TestOpsRuntimeLoggingHandler_GetConfig(t *testing.T) {
 }
 
 func TestOpsRuntimeLoggingHandler_GetContinuationStats(t *testing.T) {
-	h := NewOpsHandler(newRuntimeOpsService(t))
+	h := newRuntimeOpsHandler(t)
 	r := newOpsRuntimeRouter(h, false)
 
 	before := service.OpenAIWSContinuationStats()
@@ -146,8 +173,8 @@ func TestOpsRuntimeLoggingHandler_GetContinuationStats(t *testing.T) {
 	var payload struct {
 		Code int `json:"code"`
 		Data struct {
-			Source   string                                    `json:"source"`
-			OpenAIWS service.OpenAIWSContinuationStatsSnapshot `json:"openai_ws"`
+			Source   string                                      `json:"source"`
+			OpenAIWS service.OpenAIWSContinuationRuntimeSnapshot `json:"openai_ws"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
@@ -159,13 +186,22 @@ func TestOpsRuntimeLoggingHandler_GetContinuationStats(t *testing.T) {
 	if payload.Data.Source != "process_local" {
 		t.Fatalf("source=%q, want process_local", payload.Data.Source)
 	}
-	if payload.Data.OpenAIWS.ValidationRejectMissingCallIDTotal != after.ValidationRejectMissingCallIDTotal {
-		t.Fatalf("validation reject count = %d, want %d (before=%d)", payload.Data.OpenAIWS.ValidationRejectMissingCallIDTotal, after.ValidationRejectMissingCallIDTotal, before.ValidationRejectMissingCallIDTotal)
+	if payload.Data.OpenAIWS.Counters.ValidationRejectMissingCallIDTotal != after.ValidationRejectMissingCallIDTotal {
+		t.Fatalf("validation reject count = %d, want %d (before=%d)", payload.Data.OpenAIWS.Counters.ValidationRejectMissingCallIDTotal, after.ValidationRejectMissingCallIDTotal, before.ValidationRejectMissingCallIDTotal)
+	}
+	if !payload.Data.OpenAIWS.Config.Enabled || !payload.Data.OpenAIWS.Config.ResponsesWebsocketsV2 {
+		t.Fatalf("unexpected ws config snapshot: %+v", payload.Data.OpenAIWS.Config)
+	}
+	if payload.Data.OpenAIWS.Config.StickySessionTTLSeconds != 3600 {
+		t.Fatalf("sticky session ttl = %d, want 3600", payload.Data.OpenAIWS.Config.StickySessionTTLSeconds)
+	}
+	if payload.Data.OpenAIWS.State.LocalCleanupIntervalSeconds <= 0 {
+		t.Fatalf("unexpected state snapshot: %+v", payload.Data.OpenAIWS.State)
 	}
 }
 
 func TestOpsRuntimeLoggingHandler_UpdateUnauthorized(t *testing.T) {
-	h := NewOpsHandler(newRuntimeOpsService(t))
+	h := newRuntimeOpsHandler(t)
 	r := newOpsRuntimeRouter(h, false)
 
 	body := `{"level":"debug","enable_sampling":false,"sampling_initial":100,"sampling_thereafter":100,"caller":true,"stacktrace_level":"error","retention_days":30}`
@@ -179,7 +215,7 @@ func TestOpsRuntimeLoggingHandler_UpdateUnauthorized(t *testing.T) {
 }
 
 func TestOpsRuntimeLoggingHandler_UpdateAndResetSuccess(t *testing.T) {
-	h := NewOpsHandler(newRuntimeOpsService(t))
+	h := newRuntimeOpsHandler(t)
 	r := newOpsRuntimeRouter(h, true)
 
 	payload := map[string]any{

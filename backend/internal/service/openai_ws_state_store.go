@@ -83,6 +83,36 @@ type OpenAIWSStateStore interface {
 	BindSessionConn(groupID int64, sessionHash, connID string, ttl time.Duration)
 	GetSessionConn(groupID int64, sessionHash string) (string, bool)
 	DeleteSessionConn(groupID int64, sessionHash string)
+
+	DebugSnapshot() OpenAIWSStateStoreDebugSnapshot
+}
+
+type OpenAIWSStateStoreDebugSnapshot struct {
+	ResponseAccountLocalEntries int `json:"response_account_local_entries"`
+	ResponseConnEntries         int `json:"response_conn_entries"`
+	SessionTurnStateEntries     int `json:"session_turn_state_entries"`
+	SessionLastResponseEntries  int `json:"session_last_response_entries"`
+	SessionConnEntries          int `json:"session_conn_entries"`
+
+	ResponseAccountBindTotal       int64 `json:"response_account_bind_total"`
+	ResponseAccountDeleteTotal     int64 `json:"response_account_delete_total"`
+	ResponseConnBindTotal          int64 `json:"response_conn_bind_total"`
+	ResponseConnDeleteTotal        int64 `json:"response_conn_delete_total"`
+	SessionTurnStateBindTotal      int64 `json:"session_turn_state_bind_total"`
+	SessionTurnStateDeleteTotal    int64 `json:"session_turn_state_delete_total"`
+	SessionLastResponseBindTotal   int64 `json:"session_last_response_bind_total"`
+	SessionLastResponseDeleteTotal int64 `json:"session_last_response_delete_total"`
+	SessionConnBindTotal           int64 `json:"session_conn_bind_total"`
+	SessionConnDeleteTotal         int64 `json:"session_conn_delete_total"`
+
+	ResponseAccountPersistent     bool `json:"response_account_persistent"`
+	SessionTurnStatePersistent    bool `json:"session_turn_state_persistent"`
+	SessionLastResponsePersistent bool `json:"session_last_response_persistent"`
+
+	LocalCleanupIntervalSeconds int `json:"local_cleanup_interval_seconds"`
+	LocalCleanupMaxPerMap       int `json:"local_cleanup_max_per_map"`
+	LocalMaxEntriesPerMap       int `json:"local_max_entries_per_map"`
+	RedisTimeoutMillis          int `json:"redis_timeout_ms"`
 }
 
 type defaultOpenAIWSStateStore struct {
@@ -98,6 +128,17 @@ type defaultOpenAIWSStateStore struct {
 	sessionToLastResp    map[string]openAIWSLastResponseBinding
 	sessionToConnMu      sync.RWMutex
 	sessionToConn        map[string]openAIWSSessionConnBinding
+
+	responseAccountBindTotal    atomic.Int64
+	responseAccountDeleteTotal  atomic.Int64
+	responseConnBindTotal       atomic.Int64
+	responseConnDeleteTotal     atomic.Int64
+	sessionTurnStateBindTotal   atomic.Int64
+	sessionTurnStateDeleteTotal atomic.Int64
+	sessionLastRespBindTotal    atomic.Int64
+	sessionLastRespDeleteTotal  atomic.Int64
+	sessionConnBindTotal        atomic.Int64
+	sessionConnDeleteTotal      atomic.Int64
 
 	lastCleanupUnixNano atomic.Int64
 }
@@ -129,6 +170,7 @@ func (s *defaultOpenAIWSStateStore) BindResponseAccount(ctx context.Context, gro
 	ensureBindingCapacity(s.responseToAccount, id, openAIWSStateStoreMaxEntriesPerMap)
 	s.responseToAccount[id] = openAIWSAccountBinding{accountID: accountID, expiresAt: expiresAt}
 	s.responseToAccountMu.Unlock()
+	s.responseAccountBindTotal.Add(1)
 
 	if s.cache == nil {
 		return nil
@@ -178,7 +220,10 @@ func (s *defaultOpenAIWSStateStore) DeleteResponseAccount(ctx context.Context, g
 		return nil
 	}
 	s.responseToAccountMu.Lock()
-	delete(s.responseToAccount, id)
+	if _, ok := s.responseToAccount[id]; ok {
+		delete(s.responseToAccount, id)
+		s.responseAccountDeleteTotal.Add(1)
+	}
 	s.responseToAccountMu.Unlock()
 
 	if s.cache == nil {
@@ -205,6 +250,7 @@ func (s *defaultOpenAIWSStateStore) BindResponseConn(responseID, connID string, 
 		expiresAt: time.Now().Add(ttl),
 	}
 	s.responseToConnMu.Unlock()
+	s.responseConnBindTotal.Add(1)
 }
 
 func (s *defaultOpenAIWSStateStore) GetResponseConn(responseID string) (string, bool) {
@@ -230,7 +276,10 @@ func (s *defaultOpenAIWSStateStore) DeleteResponseConn(responseID string) {
 		return
 	}
 	s.responseToConnMu.Lock()
-	delete(s.responseToConn, id)
+	if _, ok := s.responseToConn[id]; ok {
+		delete(s.responseToConn, id)
+		s.responseConnDeleteTotal.Add(1)
+	}
 	s.responseToConnMu.Unlock()
 }
 
@@ -250,6 +299,7 @@ func (s *defaultOpenAIWSStateStore) BindSessionTurnState(groupID int64, sessionH
 		expiresAt: time.Now().Add(ttl),
 	}
 	s.sessionToTurnStateMu.Unlock()
+	s.sessionTurnStateBindTotal.Add(1)
 
 	cache := openAIWSSessionTurnStateCacheOf(s.cache)
 	if cache == nil {
@@ -301,7 +351,10 @@ func (s *defaultOpenAIWSStateStore) DeleteSessionTurnState(groupID int64, sessio
 		return
 	}
 	s.sessionToTurnStateMu.Lock()
-	delete(s.sessionToTurnState, key)
+	if _, ok := s.sessionToTurnState[key]; ok {
+		delete(s.sessionToTurnState, key)
+		s.sessionTurnStateDeleteTotal.Add(1)
+	}
 	s.sessionToTurnStateMu.Unlock()
 
 	cache := openAIWSSessionTurnStateCacheOf(s.cache)
@@ -329,6 +382,7 @@ func (s *defaultOpenAIWSStateStore) BindSessionLastResponse(groupID int64, sessi
 		expiresAt:  time.Now().Add(ttl),
 	}
 	s.sessionToLastRespMu.Unlock()
+	s.sessionLastRespBindTotal.Add(1)
 
 	cache := openAIWSSessionLastResponseCacheOf(s.cache)
 	if cache == nil {
@@ -380,7 +434,10 @@ func (s *defaultOpenAIWSStateStore) DeleteSessionLastResponse(groupID int64, ses
 		return
 	}
 	s.sessionToLastRespMu.Lock()
-	delete(s.sessionToLastResp, key)
+	if _, ok := s.sessionToLastResp[key]; ok {
+		delete(s.sessionToLastResp, key)
+		s.sessionLastRespDeleteTotal.Add(1)
+	}
 	s.sessionToLastRespMu.Unlock()
 
 	cache := openAIWSSessionLastResponseCacheOf(s.cache)
@@ -408,6 +465,7 @@ func (s *defaultOpenAIWSStateStore) BindSessionConn(groupID int64, sessionHash, 
 		expiresAt: time.Now().Add(ttl),
 	}
 	s.sessionToConnMu.Unlock()
+	s.sessionConnBindTotal.Add(1)
 }
 
 func (s *defaultOpenAIWSStateStore) GetSessionConn(groupID int64, sessionHash string) (string, bool) {
@@ -433,8 +491,71 @@ func (s *defaultOpenAIWSStateStore) DeleteSessionConn(groupID int64, sessionHash
 		return
 	}
 	s.sessionToConnMu.Lock()
-	delete(s.sessionToConn, key)
+	if _, ok := s.sessionToConn[key]; ok {
+		delete(s.sessionToConn, key)
+		s.sessionConnDeleteTotal.Add(1)
+	}
 	s.sessionToConnMu.Unlock()
+}
+
+func (s *defaultOpenAIWSStateStore) DebugSnapshot() OpenAIWSStateStoreDebugSnapshot {
+	if s == nil {
+		return OpenAIWSStateStoreDebugSnapshot{
+			LocalCleanupIntervalSeconds: int(openAIWSStateStoreCleanupInterval / time.Second),
+			LocalCleanupMaxPerMap:       openAIWSStateStoreCleanupMaxPerMap,
+			LocalMaxEntriesPerMap:       openAIWSStateStoreMaxEntriesPerMap,
+			RedisTimeoutMillis:          int(openAIWSStateStoreRedisTimeout / time.Millisecond),
+		}
+	}
+	s.maybeCleanup()
+
+	s.responseToAccountMu.RLock()
+	responseAccountEntries := len(s.responseToAccount)
+	s.responseToAccountMu.RUnlock()
+
+	s.responseToConnMu.RLock()
+	responseConnEntries := len(s.responseToConn)
+	s.responseToConnMu.RUnlock()
+
+	s.sessionToTurnStateMu.RLock()
+	sessionTurnStateEntries := len(s.sessionToTurnState)
+	s.sessionToTurnStateMu.RUnlock()
+
+	s.sessionToLastRespMu.RLock()
+	sessionLastResponseEntries := len(s.sessionToLastResp)
+	s.sessionToLastRespMu.RUnlock()
+
+	s.sessionToConnMu.RLock()
+	sessionConnEntries := len(s.sessionToConn)
+	s.sessionToConnMu.RUnlock()
+
+	return OpenAIWSStateStoreDebugSnapshot{
+		ResponseAccountLocalEntries: responseAccountEntries,
+		ResponseConnEntries:         responseConnEntries,
+		SessionTurnStateEntries:     sessionTurnStateEntries,
+		SessionLastResponseEntries:  sessionLastResponseEntries,
+		SessionConnEntries:          sessionConnEntries,
+
+		ResponseAccountBindTotal:       s.responseAccountBindTotal.Load(),
+		ResponseAccountDeleteTotal:     s.responseAccountDeleteTotal.Load(),
+		ResponseConnBindTotal:          s.responseConnBindTotal.Load(),
+		ResponseConnDeleteTotal:        s.responseConnDeleteTotal.Load(),
+		SessionTurnStateBindTotal:      s.sessionTurnStateBindTotal.Load(),
+		SessionTurnStateDeleteTotal:    s.sessionTurnStateDeleteTotal.Load(),
+		SessionLastResponseBindTotal:   s.sessionLastRespBindTotal.Load(),
+		SessionLastResponseDeleteTotal: s.sessionLastRespDeleteTotal.Load(),
+		SessionConnBindTotal:           s.sessionConnBindTotal.Load(),
+		SessionConnDeleteTotal:         s.sessionConnDeleteTotal.Load(),
+
+		ResponseAccountPersistent:     s.cache != nil,
+		SessionTurnStatePersistent:    openAIWSSessionTurnStateCacheOf(s.cache) != nil,
+		SessionLastResponsePersistent: openAIWSSessionLastResponseCacheOf(s.cache) != nil,
+
+		LocalCleanupIntervalSeconds: int(openAIWSStateStoreCleanupInterval / time.Second),
+		LocalCleanupMaxPerMap:       openAIWSStateStoreCleanupMaxPerMap,
+		LocalMaxEntriesPerMap:       openAIWSStateStoreMaxEntriesPerMap,
+		RedisTimeoutMillis:          int(openAIWSStateStoreRedisTimeout / time.Millisecond),
+	}
 }
 
 func (s *defaultOpenAIWSStateStore) maybeCleanup() {
