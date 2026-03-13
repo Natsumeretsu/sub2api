@@ -8,32 +8,32 @@ import (
 // OpenAIWSContinuationStatsSnapshot 提供 websocket continuation 热路径的轻量快照。
 // 该统计用于本地诊断与回归验证，不承担账单或强一致监控语义。
 type OpenAIWSContinuationStatsSnapshot struct {
-	ValidationRejectMissingCallIDTotal        int64
-	ValidationRejectMissingItemReferenceTotal int64
-	TurnStoreFallbackTotal                    int64
-	WSToHTTPMidSessionTotal                   int64
-	PreviousResponseRecoveredFromSessionTotal int64
-	PreviousResponseStrippedMidSessionTotal   int64
-	AccountSwitchWithCacheDropTotal           int64
-	StrongCohortFallbackTotal                 int64
-	StrongCohortDegradeBlockedTotal           int64
-	CacheAffinitySelectionTotal               int64
-	DuplicateTurnRetryBlockedAfterEmitTotal   int64
-	EmittedBytesBeforeRetryTotal              int64
-	TurnReuseProcessingConflictTotal          int64
-	TurnReuseEmittedConflictTotal             int64
-	TurnReuseCompletedConflictTotal           int64
-	SessionStickyRebindFromLastResponseTotal  int64
-	PrevNotFoundAlignRetryTotal               int64
-	PrevNotFoundDropRetryTotal                int64
-	PrevNotFoundDropSelfContainedRetryTotal   int64
-	PrevNotFoundFailClosedMissingAnchorTotal  int64
-	PrevNotFoundFailClosedStaleAnchorTotal    int64
-	PreflightPingAlignRetryTotal              int64
-	PreflightPingDropRetryTotal               int64
-	PreflightPingDropSelfContainedRetryTotal  int64
-	PreflightPingFailClosedMissingAnchorTotal int64
-	PreflightPingFailClosedStaleAnchorTotal   int64
+	ValidationRejectMissingCallIDTotal        int64 `json:"validation_reject_missing_call_id_total"`
+	ValidationRejectMissingItemReferenceTotal int64 `json:"validation_reject_missing_item_reference_total"`
+	TurnStoreFallbackTotal                    int64 `json:"turn_store_fallback_total"`
+	WSToHTTPMidSessionTotal                   int64 `json:"ws_to_http_mid_session_total"`
+	PreviousResponseRecoveredFromSessionTotal int64 `json:"previous_response_recovered_from_session_total"`
+	PreviousResponseStrippedMidSessionTotal   int64 `json:"previous_response_stripped_mid_session_total"`
+	AccountSwitchWithCacheDropTotal           int64 `json:"account_switch_with_cache_drop_total"`
+	StrongCohortFallbackTotal                 int64 `json:"strong_cohort_fallback_total"`
+	StrongCohortDegradeBlockedTotal           int64 `json:"strong_cohort_degrade_blocked_total"`
+	CacheAffinitySelectionTotal               int64 `json:"cache_affinity_selection_total"`
+	DuplicateTurnRetryBlockedAfterEmitTotal   int64 `json:"duplicate_turn_retry_blocked_after_emit_total"`
+	EmittedBytesBeforeRetryTotal              int64 `json:"emitted_bytes_before_retry_total"`
+	TurnReuseProcessingConflictTotal          int64 `json:"turn_reuse_processing_conflict_total"`
+	TurnReuseEmittedConflictTotal             int64 `json:"turn_reuse_emitted_conflict_total"`
+	TurnReuseCompletedConflictTotal           int64 `json:"turn_reuse_completed_conflict_total"`
+	SessionStickyRebindFromLastResponseTotal  int64 `json:"session_sticky_rebind_from_last_response_total"`
+	PrevNotFoundAlignRetryTotal               int64 `json:"prev_not_found_align_retry_total"`
+	PrevNotFoundDropRetryTotal                int64 `json:"prev_not_found_drop_retry_total"`
+	PrevNotFoundDropSelfContainedRetryTotal   int64 `json:"prev_not_found_drop_self_contained_retry_total"`
+	PrevNotFoundFailClosedMissingAnchorTotal  int64 `json:"prev_not_found_fail_closed_missing_anchor_total"`
+	PrevNotFoundFailClosedStaleAnchorTotal    int64 `json:"prev_not_found_fail_closed_stale_anchor_total"`
+	PreflightPingAlignRetryTotal              int64 `json:"preflight_ping_align_retry_total"`
+	PreflightPingDropRetryTotal               int64 `json:"preflight_ping_drop_retry_total"`
+	PreflightPingDropSelfContainedRetryTotal  int64 `json:"preflight_ping_drop_self_contained_retry_total"`
+	PreflightPingFailClosedMissingAnchorTotal int64 `json:"preflight_ping_fail_closed_missing_anchor_total"`
+	PreflightPingFailClosedStaleAnchorTotal   int64 `json:"preflight_ping_fail_closed_stale_anchor_total"`
 }
 
 var (
