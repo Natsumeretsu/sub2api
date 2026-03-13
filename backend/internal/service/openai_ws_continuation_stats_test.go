@@ -15,10 +15,12 @@ func TestOpenAIWSContinuationStatsSnapshot(t *testing.T) {
 	RecordOpenAIWSContinuationValidationReject("function_call_output_missing_item_reference")
 	recordOpenAIWSContinuationPrevNotFoundAlignRetry()
 	recordOpenAIWSContinuationPrevNotFoundDropRetry(true)
-	recordOpenAIWSContinuationPrevNotFoundFailClosedMissingAnchor()
+	recordOpenAIWSContinuationPrevNotFoundFailClosed("missing_local_anchor")
+	recordOpenAIWSContinuationPrevNotFoundFailClosed("stale_local_anchor")
 	recordOpenAIWSContinuationPreflightPingAlignRetry()
 	recordOpenAIWSContinuationPreflightPingDropRetry(true)
-	recordOpenAIWSContinuationPreflightPingFailClosedMissingAnchor()
+	recordOpenAIWSContinuationPreflightPingFailClosed("missing_local_anchor")
+	recordOpenAIWSContinuationPreflightPingFailClosed("stale_local_anchor")
 
 	stats := OpenAIWSContinuationStats()
 	require.Equal(t, int64(1), stats.ValidationRejectMissingCallIDTotal)
@@ -27,16 +29,18 @@ func TestOpenAIWSContinuationStatsSnapshot(t *testing.T) {
 	require.Equal(t, int64(1), stats.PrevNotFoundDropRetryTotal)
 	require.Equal(t, int64(1), stats.PrevNotFoundDropSelfContainedRetryTotal)
 	require.Equal(t, int64(1), stats.PrevNotFoundFailClosedMissingAnchorTotal)
+	require.Equal(t, int64(1), stats.PrevNotFoundFailClosedStaleAnchorTotal)
 	require.Equal(t, int64(1), stats.PreflightPingAlignRetryTotal)
 	require.Equal(t, int64(1), stats.PreflightPingDropRetryTotal)
 	require.Equal(t, int64(1), stats.PreflightPingDropSelfContainedRetryTotal)
 	require.Equal(t, int64(1), stats.PreflightPingFailClosedMissingAnchorTotal)
+	require.Equal(t, int64(1), stats.PreflightPingFailClosedStaleAnchorTotal)
 }
 
 func TestOpenAIWSContinuationStatsResetForTest(t *testing.T) {
 	resetOpenAIWSContinuationStatsForTest()
 	recordOpenAIWSContinuationPrevNotFoundDropRetry(false)
-	recordOpenAIWSContinuationPreflightPingFailClosedMissingAnchor()
+	recordOpenAIWSContinuationPreflightPingFailClosed("missing_local_anchor")
 
 	resetOpenAIWSContinuationStatsForTest()
 	stats := OpenAIWSContinuationStats()

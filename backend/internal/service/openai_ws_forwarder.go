@@ -1645,6 +1645,47 @@ func functionCallOutputStandaloneRetryReasonFromPayload(payload []byte) string {
 	return FunctionCallOutputStandaloneRetryReason(reqBody)
 }
 
+type openAIWSFunctionCallOutputPrevRecoveryPlan struct {
+	StandaloneRetryReason string
+	CanAlign              bool
+	CanSelfContainedDrop  bool
+	FailCloseReason       string
+	FailCloseMessage      string
+}
+
+func buildOpenAIWSFunctionCallOutputPrevRecoveryPlan(
+	payload []byte,
+	currentPreviousResponseID string,
+	expectedPreviousResponseID string,
+) openAIWSFunctionCallOutputPrevRecoveryPlan {
+	currentPreviousResponseID = strings.TrimSpace(currentPreviousResponseID)
+	expectedPreviousResponseID = strings.TrimSpace(expectedPreviousResponseID)
+	if currentPreviousResponseID == "" {
+		return openAIWSFunctionCallOutputPrevRecoveryPlan{}
+	}
+
+	plan := openAIWSFunctionCallOutputPrevRecoveryPlan{
+		StandaloneRetryReason: functionCallOutputStandaloneRetryReasonFromPayload(payload),
+	}
+	switch {
+	case expectedPreviousResponseID == "":
+		if plan.StandaloneRetryReason != "" {
+			plan.CanSelfContainedDrop = true
+		} else {
+			plan.FailCloseReason = "missing_local_anchor"
+			plan.FailCloseMessage = "function_call_output previous_response_id cannot be recovered without a local continuation anchor; please restart the conversation"
+		}
+	case currentPreviousResponseID != expectedPreviousResponseID:
+		plan.CanAlign = true
+	case plan.StandaloneRetryReason != "":
+		plan.CanSelfContainedDrop = true
+	default:
+		plan.FailCloseReason = "stale_local_anchor"
+		plan.FailCloseMessage = "function_call_output previous_response_id matched the local continuation anchor, but upstream still rejected the anchor and the current tool turn is not self-contained; please restart the conversation"
+	}
+	return plan
+}
+
 func clearOpenAIWSSessionConnBindingIfMatches(
 	stateStore OpenAIWSStateStore,
 	groupID int64,
@@ -2893,26 +2934,24 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), upstreamMessage, errCodeRaw, errTypeRaw, errMsgRaw)
 				fallbackReason, _ := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
 				errCode, errType, errMessage := summarizeOpenAIWSErrorEventFieldsFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
-				turnSelfContainedRetryReason := ""
-				if turnHasFunctionCallOutput && turnPreviousResponseID != "" && expectedPrevForRecovery == "" {
-					turnSelfContainedRetryReason = functionCallOutputStandaloneRetryReasonFromPayload(payload)
+				turnFunctionCallOutputRecoveryPlan := openAIWSFunctionCallOutputPrevRecoveryPlan{}
+				if turnHasFunctionCallOutput {
+					turnFunctionCallOutputRecoveryPlan = buildOpenAIWSFunctionCallOutputPrevRecoveryPlan(
+						payload,
+						turnPreviousResponseID,
+						expectedPrevForRecovery,
+					)
 				}
 				recoverableFunctionCallOutputPrevNotFound := turnHasFunctionCallOutput &&
-					expectedPrevForRecovery != "" &&
-					turnPreviousResponseID != "" &&
-					strings.TrimSpace(turnPreviousResponseID) != expectedPrevForRecovery
+					turnFunctionCallOutputRecoveryPlan.CanAlign
 				recoverableStandaloneFunctionCallOutputPrevNotFound := fallbackReason == openAIWSIngressStagePreviousResponseNotFound &&
 					turnHasFunctionCallOutput &&
-					turnPreviousResponseID != "" &&
-					expectedPrevForRecovery == "" &&
-					turnSelfContainedRetryReason != "" &&
+					turnFunctionCallOutputRecoveryPlan.CanSelfContainedDrop &&
 					s.openAIWSIngressPreviousResponseRecoveryEnabled() &&
 					!wroteDownstream
 				failClosedFunctionCallOutputPrevNotFound := fallbackReason == openAIWSIngressStagePreviousResponseNotFound &&
 					turnHasFunctionCallOutput &&
-					turnPreviousResponseID != "" &&
-					expectedPrevForRecovery == "" &&
-					turnSelfContainedRetryReason == "" &&
+					turnFunctionCallOutputRecoveryPlan.FailCloseReason != "" &&
 					s.openAIWSIngressPreviousResponseRecoveryEnabled() &&
 					!wroteDownstream
 				recoverablePrevNotFound := fallbackReason == openAIWSIngressStagePreviousResponseNotFound &&
@@ -2921,18 +2960,20 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					!wroteDownstream &&
 					(!turnHasFunctionCallOutput || recoverableFunctionCallOutputPrevNotFound || recoverableStandaloneFunctionCallOutputPrevNotFound)
 				if failClosedFunctionCallOutputPrevNotFound {
-					recordOpenAIWSContinuationPrevNotFoundFailClosedMissingAnchor()
+					recordOpenAIWSContinuationPrevNotFoundFailClosed(turnFunctionCallOutputRecoveryPlan.FailCloseReason)
 					logOpenAIWSModeInfo(
-						"ingress_ws_prev_response_fail_closed account_id=%d turn=%d conn_id=%s idx=%d reason=missing_local_anchor code=%s type=%s message=%s previous_response_id=%s previous_response_id_kind=%s has_function_call_output=%v response_id=%s store_disabled=%v has_prompt_cache_key=%v",
+						"ingress_ws_prev_response_fail_closed account_id=%d turn=%d conn_id=%s idx=%d reason=%s code=%s type=%s message=%s previous_response_id=%s previous_response_id_kind=%s expected_previous_response_id=%s has_function_call_output=%v response_id=%s store_disabled=%v has_prompt_cache_key=%v",
 						account.ID,
 						turn,
 						truncateOpenAIWSLogValue(lease.ConnID(), openAIWSIDValueMaxLen),
 						eventCount,
+						normalizeOpenAIWSLogValue(turnFunctionCallOutputRecoveryPlan.FailCloseReason),
 						errCode,
 						errType,
 						errMessage,
 						truncateOpenAIWSLogValue(turnPreviousResponseID, openAIWSIDValueMaxLen),
 						normalizeOpenAIWSLogValue(turnPreviousResponseIDKind),
+						truncateOpenAIWSLogValue(expectedPrevForRecovery, openAIWSIDValueMaxLen),
 						turnHasFunctionCallOutput,
 						truncateOpenAIWSLogValue(responseID, openAIWSIDValueMaxLen),
 						turnStoreDisabled,
@@ -2941,7 +2982,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					markBrokenIngressLease(lease, openAIWSIngressStagePreviousResponseNotFound)
 					return nil, NewOpenAIWSClientCloseError(
 						coderws.StatusPolicyViolation,
-						"function_call_output previous_response_id cannot be recovered without a local continuation anchor; please restart the conversation",
+						turnFunctionCallOutputRecoveryPlan.FailCloseMessage,
 						nil,
 					)
 				}
@@ -2973,7 +3014,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 							turn,
 							truncateOpenAIWSLogValue(lease.ConnID(), openAIWSIDValueMaxLen),
 							eventCount,
-							normalizeOpenAIWSLogValue(turnSelfContainedRetryReason),
+							normalizeOpenAIWSLogValue(turnFunctionCallOutputRecoveryPlan.StandaloneRetryReason),
 						)
 					}
 				} else {
@@ -3176,6 +3217,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	turnRetry := 0
 	turnPrevRecoveryTried := false
 	turnPrevRecoveryAllowFreshConn := false
+	turnSkipFunctionCallOutputPrevInfer := false
 	lastTurnFinishedAt := time.Time{}
 	lastTurnResponseID := ""
 	lastTurnPayload := []byte(nil)
@@ -3212,11 +3254,15 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			sessionHash,
 			lastTurnResponseID,
 		)
-		standaloneRetryReason := ""
-		if currentPayloadHasFunctionCallOutput && currentPreviousResponseID != "" && expectedPrev == "" {
-			standaloneRetryReason = functionCallOutputStandaloneRetryReasonFromPayload(currentPayload)
+		recoveryPlan := openAIWSFunctionCallOutputPrevRecoveryPlan{}
+		if currentPayloadHasFunctionCallOutput {
+			recoveryPlan = buildOpenAIWSFunctionCallOutputPrevRecoveryPlan(
+				currentPayload,
+				currentPreviousResponseID,
+				expectedPrev,
+			)
 		}
-		if currentPreviousResponseID != "" && expectedPrev != "" && currentPreviousResponseID != expectedPrev {
+		if recoveryPlan.CanAlign {
 			alignedPayload, changed, alignErr := alignStoreDisabledPreviousResponseID(currentPayload, expectedPrev)
 			if alignErr != nil {
 				logOpenAIWSModeInfo(
@@ -3267,17 +3313,29 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				}
 			}
 		}
+		if currentPayloadHasFunctionCallOutput && recoveryPlan.FailCloseReason != "" {
+			logOpenAIWSModeInfo(
+				"ingress_ws_prev_response_recovery_skip account_id=%d turn=%d conn_id=%s reason=%s previous_response_id=%s expected_previous_response_id=%s",
+				account.ID,
+				turn,
+				truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
+				normalizeOpenAIWSLogValue(recoveryPlan.FailCloseReason),
+				truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+				truncateOpenAIWSLogValue(expectedPrev, openAIWSIDValueMaxLen),
+			)
+			return false
+		}
 		if isStrictAffinityTurn(currentPayload) {
 			// Layer 2：严格亲和链路命中 previous_response_not_found 时，降级为“去掉 previous_response_id 后重放一次”。
 			// 该错误说明续链锚点已失效，继续 strict fail-close 只会直接中断本轮请求。
-			if currentPayloadHasFunctionCallOutput && standaloneRetryReason != "" {
+			if currentPayloadHasFunctionCallOutput && recoveryPlan.StandaloneRetryReason != "" {
 				logOpenAIWSModeInfo(
 					"ingress_ws_prev_response_recovery_layer2 account_id=%d turn=%d conn_id=%s store_disabled_conn_mode=%s action=drop_previous_response_id_self_contained_retry reason=%s",
 					account.ID,
 					turn,
 					truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
 					normalizeOpenAIWSLogValue(storeDisabledConnMode),
-					normalizeOpenAIWSLogValue(standaloneRetryReason),
+					normalizeOpenAIWSLogValue(recoveryPlan.StandaloneRetryReason),
 				)
 			} else {
 				logOpenAIWSModeInfo(
@@ -3288,6 +3346,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					normalizeOpenAIWSLogValue(storeDisabledConnMode),
 				)
 			}
+		}
+		if currentPayloadHasFunctionCallOutput && !recoveryPlan.CanSelfContainedDrop {
+			logOpenAIWSModeInfo(
+				"ingress_ws_prev_response_recovery_skip account_id=%d turn=%d conn_id=%s reason=tool_turn_drop_not_safe previous_response_id=%s expected_previous_response_id=%s",
+				account.ID,
+				turn,
+				truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
+				truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+				truncateOpenAIWSLogValue(expectedPrev, openAIWSIDValueMaxLen),
+			)
+			return false
 		}
 		turnPrevRecoveryTried = true
 		updatedPayload, removed, dropErr := dropPreviousResponseIDFromRawPayload(currentPayload)
@@ -3320,14 +3389,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			)
 			return false
 		}
-		if currentPayloadHasFunctionCallOutput && standaloneRetryReason != "" {
+		if currentPayloadHasFunctionCallOutput && recoveryPlan.StandaloneRetryReason != "" {
 			recordOpenAIWSContinuationPrevNotFoundDropRetry(true)
 			logOpenAIWSModeInfo(
 				"ingress_ws_prev_response_recovery account_id=%d turn=%d conn_id=%s action=drop_previous_response_id_self_contained retry=1 reason=%s",
 				account.ID,
 				turn,
 				truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
-				normalizeOpenAIWSLogValue(standaloneRetryReason),
+				normalizeOpenAIWSLogValue(recoveryPlan.StandaloneRetryReason),
 			)
 		} else {
 			recordOpenAIWSContinuationPrevNotFoundDropRetry(false)
@@ -3340,6 +3409,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		currentPayload = updatedWithInput
 		currentPayloadBytes = len(updatedWithInput)
+		turnSkipFunctionCallOutputPrevInfer = currentPayloadHasFunctionCallOutput && recoveryPlan.StandaloneRetryReason != ""
 		resetSessionLease(true)
 		skipBeforeTurn = true
 		return true
@@ -3394,7 +3464,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			currentPreviousResponseID,
 			expectedPrev,
 			expectedPrevFromSessionState,
-		) {
+		) && !turnSkipFunctionCallOutputPrevInfer {
 			updatedPayload, setPrevErr := setPreviousResponseIDToRawPayload(currentPayload, expectedPrev)
 			if setPrevErr != nil {
 				logOpenAIWSModeInfo(
@@ -3580,40 +3650,44 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 							sessionHash,
 							lastTurnResponseID,
 						)
-						standaloneRetryReason := ""
-						if hasFunctionCallOutput && expectedPrevForPingRecovery == "" {
-							standaloneRetryReason = functionCallOutputStandaloneRetryReasonFromPayload(currentPayload)
+						recoveryPlan := openAIWSFunctionCallOutputPrevRecoveryPlan{}
+						if hasFunctionCallOutput {
+							recoveryPlan = buildOpenAIWSFunctionCallOutputPrevRecoveryPlan(
+								currentPayload,
+								currentPreviousResponseID,
+								expectedPrevForPingRecovery,
+							)
 						}
-						if hasFunctionCallOutput && expectedPrevForPingRecovery == "" && standaloneRetryReason == "" {
-							recordOpenAIWSContinuationPreflightPingFailClosedMissingAnchor()
+						if hasFunctionCallOutput && recoveryPlan.FailCloseReason != "" {
+							recordOpenAIWSContinuationPreflightPingFailClosed(recoveryPlan.FailCloseReason)
 							logOpenAIWSModeInfo(
-								"ingress_ws_preflight_ping_recovery_fail_closed account_id=%d turn=%d conn_id=%s reason=missing_local_anchor previous_response_id=%s has_function_call_output=%v",
+								"ingress_ws_preflight_ping_recovery_fail_closed account_id=%d turn=%d conn_id=%s reason=%s previous_response_id=%s expected_previous_response_id=%s has_function_call_output=%v",
 								account.ID,
 								turn,
 								truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+								normalizeOpenAIWSLogValue(recoveryPlan.FailCloseReason),
 								truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+								truncateOpenAIWSLogValue(expectedPrevForPingRecovery, openAIWSIDValueMaxLen),
 								hasFunctionCallOutput,
 							)
 							resetSessionLease(true)
 							return NewOpenAIWSClientCloseError(
 								coderws.StatusPolicyViolation,
-								"function_call_output previous_response_id cannot be recovered without a local continuation anchor; please restart the conversation",
+								recoveryPlan.FailCloseMessage,
 								pingErr,
 							)
 						}
-						if hasFunctionCallOutput && expectedPrevForPingRecovery == "" && standaloneRetryReason != "" {
+						if hasFunctionCallOutput && recoveryPlan.CanSelfContainedDrop {
 							logOpenAIWSModeInfo(
 								"ingress_ws_preflight_ping_recovery account_id=%d turn=%d conn_id=%s action=drop_previous_response_id_self_contained_retry reason=%s previous_response_id=%s",
 								account.ID,
 								turn,
 								truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
-								normalizeOpenAIWSLogValue(standaloneRetryReason),
+								normalizeOpenAIWSLogValue(recoveryPlan.StandaloneRetryReason),
 								truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
 							)
 						}
-						if hasFunctionCallOutput &&
-							expectedPrevForPingRecovery != "" &&
-							currentPreviousResponseID != expectedPrevForPingRecovery {
+						if hasFunctionCallOutput && recoveryPlan.CanAlign {
 							alignedPayload, changed, alignErr := alignStoreDisabledPreviousResponseID(
 								currentPayload,
 								expectedPrevForPingRecovery,
@@ -3667,6 +3741,22 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 								}
 							}
 						}
+						if hasFunctionCallOutput && !recoveryPlan.CanSelfContainedDrop {
+							logOpenAIWSModeInfo(
+								"ingress_ws_preflight_ping_recovery_skip account_id=%d turn=%d conn_id=%s reason=tool_turn_drop_not_safe previous_response_id=%s expected_previous_response_id=%s",
+								account.ID,
+								turn,
+								truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+								truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+								truncateOpenAIWSLogValue(expectedPrevForPingRecovery, openAIWSIDValueMaxLen),
+							)
+							resetSessionLease(true)
+							return NewOpenAIWSClientCloseError(
+								coderws.StatusPolicyViolation,
+								"function_call_output previous_response_id recovery could not be prepared safely; please restart the conversation",
+								pingErr,
+							)
+						}
 						updatedPayload, removed, dropErr := dropPreviousResponseIDFromRawPayload(currentPayload)
 						if dropErr != nil || !removed {
 							reason := "not_removed"
@@ -3697,7 +3787,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 									truncateOpenAIWSLogValue(setInputErr.Error(), openAIWSLogValueMaxLen),
 								)
 							} else {
-								if hasFunctionCallOutput && standaloneRetryReason != "" {
+								if hasFunctionCallOutput && recoveryPlan.StandaloneRetryReason != "" {
 									recordOpenAIWSContinuationPreflightPingDropRetry(true)
 									logOpenAIWSModeInfo(
 										"ingress_ws_preflight_ping_recovery account_id=%d turn=%d conn_id=%s action=drop_previous_response_id_self_contained_retry previous_response_id=%s reason=%s",
@@ -3705,7 +3795,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 										turn,
 										truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
 										truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
-										normalizeOpenAIWSLogValue(standaloneRetryReason),
+										normalizeOpenAIWSLogValue(recoveryPlan.StandaloneRetryReason),
 									)
 								} else {
 									recordOpenAIWSContinuationPreflightPingDropRetry(false)
@@ -3718,6 +3808,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 									)
 								}
 								turnPrevRecoveryTried = true
+								turnSkipFunctionCallOutputPrevInfer = hasFunctionCallOutput && recoveryPlan.StandaloneRetryReason != ""
 								currentPayload = updatedWithInput
 								currentPayloadBytes = len(updatedWithInput)
 								resetSessionLease(true)
@@ -3798,6 +3889,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		turnRetry = 0
 		turnPrevRecoveryTried = false
 		turnPrevRecoveryAllowFreshConn = false
+		turnSkipFunctionCallOutputPrevInfer = false
 		lastTurnFinishedAt = time.Now()
 		if hooks != nil && hooks.AfterTurn != nil {
 			hooks.AfterTurn(turn, result, nil)

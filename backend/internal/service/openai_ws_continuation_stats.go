@@ -1,6 +1,9 @@
 package service
 
-import "sync/atomic"
+import (
+	"strings"
+	"sync/atomic"
+)
 
 // OpenAIWSContinuationStatsSnapshot 提供 websocket continuation 热路径的轻量快照。
 // 该统计用于本地诊断与回归验证，不承担账单或强一致监控语义。
@@ -11,10 +14,12 @@ type OpenAIWSContinuationStatsSnapshot struct {
 	PrevNotFoundDropRetryTotal                int64
 	PrevNotFoundDropSelfContainedRetryTotal   int64
 	PrevNotFoundFailClosedMissingAnchorTotal  int64
+	PrevNotFoundFailClosedStaleAnchorTotal    int64
 	PreflightPingAlignRetryTotal              int64
 	PreflightPingDropRetryTotal               int64
 	PreflightPingDropSelfContainedRetryTotal  int64
 	PreflightPingFailClosedMissingAnchorTotal int64
+	PreflightPingFailClosedStaleAnchorTotal   int64
 }
 
 var (
@@ -24,10 +29,12 @@ var (
 	openAIWSContinuationPrevNotFoundDropRetryTotal                atomic.Int64
 	openAIWSContinuationPrevNotFoundDropSelfContainedRetryTotal   atomic.Int64
 	openAIWSContinuationPrevNotFoundFailClosedMissingAnchorTotal  atomic.Int64
+	openAIWSContinuationPrevNotFoundFailClosedStaleAnchorTotal    atomic.Int64
 	openAIWSContinuationPreflightPingAlignRetryTotal              atomic.Int64
 	openAIWSContinuationPreflightPingDropRetryTotal               atomic.Int64
 	openAIWSContinuationPreflightPingDropSelfContainedRetryTotal  atomic.Int64
 	openAIWSContinuationPreflightPingFailClosedMissingAnchorTotal atomic.Int64
+	openAIWSContinuationPreflightPingFailClosedStaleAnchorTotal   atomic.Int64
 )
 
 func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
@@ -38,10 +45,12 @@ func OpenAIWSContinuationStats() OpenAIWSContinuationStatsSnapshot {
 		PrevNotFoundDropRetryTotal:                openAIWSContinuationPrevNotFoundDropRetryTotal.Load(),
 		PrevNotFoundDropSelfContainedRetryTotal:   openAIWSContinuationPrevNotFoundDropSelfContainedRetryTotal.Load(),
 		PrevNotFoundFailClosedMissingAnchorTotal:  openAIWSContinuationPrevNotFoundFailClosedMissingAnchorTotal.Load(),
+		PrevNotFoundFailClosedStaleAnchorTotal:    openAIWSContinuationPrevNotFoundFailClosedStaleAnchorTotal.Load(),
 		PreflightPingAlignRetryTotal:              openAIWSContinuationPreflightPingAlignRetryTotal.Load(),
 		PreflightPingDropRetryTotal:               openAIWSContinuationPreflightPingDropRetryTotal.Load(),
 		PreflightPingDropSelfContainedRetryTotal:  openAIWSContinuationPreflightPingDropSelfContainedRetryTotal.Load(),
 		PreflightPingFailClosedMissingAnchorTotal: openAIWSContinuationPreflightPingFailClosedMissingAnchorTotal.Load(),
+		PreflightPingFailClosedStaleAnchorTotal:   openAIWSContinuationPreflightPingFailClosedStaleAnchorTotal.Load(),
 	}
 }
 
@@ -73,8 +82,13 @@ func recordOpenAIWSContinuationPrevNotFoundDropRetry(selfContained bool) {
 	}
 }
 
-func recordOpenAIWSContinuationPrevNotFoundFailClosedMissingAnchor() {
-	openAIWSContinuationPrevNotFoundFailClosedMissingAnchorTotal.Add(1)
+func recordOpenAIWSContinuationPrevNotFoundFailClosed(reason string) {
+	switch strings.TrimSpace(reason) {
+	case "stale_local_anchor":
+		openAIWSContinuationPrevNotFoundFailClosedStaleAnchorTotal.Add(1)
+	default:
+		openAIWSContinuationPrevNotFoundFailClosedMissingAnchorTotal.Add(1)
+	}
 }
 
 func recordOpenAIWSContinuationPreflightPingAlignRetry() {
@@ -88,8 +102,13 @@ func recordOpenAIWSContinuationPreflightPingDropRetry(selfContained bool) {
 	}
 }
 
-func recordOpenAIWSContinuationPreflightPingFailClosedMissingAnchor() {
-	openAIWSContinuationPreflightPingFailClosedMissingAnchorTotal.Add(1)
+func recordOpenAIWSContinuationPreflightPingFailClosed(reason string) {
+	switch strings.TrimSpace(reason) {
+	case "stale_local_anchor":
+		openAIWSContinuationPreflightPingFailClosedStaleAnchorTotal.Add(1)
+	default:
+		openAIWSContinuationPreflightPingFailClosedMissingAnchorTotal.Add(1)
+	}
 }
 
 func resetOpenAIWSContinuationStatsForTest() {
@@ -99,8 +118,10 @@ func resetOpenAIWSContinuationStatsForTest() {
 	openAIWSContinuationPrevNotFoundDropRetryTotal.Store(0)
 	openAIWSContinuationPrevNotFoundDropSelfContainedRetryTotal.Store(0)
 	openAIWSContinuationPrevNotFoundFailClosedMissingAnchorTotal.Store(0)
+	openAIWSContinuationPrevNotFoundFailClosedStaleAnchorTotal.Store(0)
 	openAIWSContinuationPreflightPingAlignRetryTotal.Store(0)
 	openAIWSContinuationPreflightPingDropRetryTotal.Store(0)
 	openAIWSContinuationPreflightPingDropSelfContainedRetryTotal.Store(0)
 	openAIWSContinuationPreflightPingFailClosedMissingAnchorTotal.Store(0)
+	openAIWSContinuationPreflightPingFailClosedStaleAnchorTotal.Store(0)
 }

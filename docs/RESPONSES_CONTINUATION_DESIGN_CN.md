@@ -35,8 +35,9 @@
 
 1. 本地能确认锚点时，优先本地恢复
 2. 请求本身具备自包含工具上下文时，允许受控降级重试
-3. 既无本地锚点、请求也不自包含时，明确 fail-close
-4. 不做 transcript replay
+3. 本地锚点已对齐但 upstream 仍判 stale 时，只有自包含工具回合才允许受控降级
+4. 既无本地锚点、请求也不自包含时，明确 fail-close
+5. 不做 transcript replay
 
 ### 1.2 还没有完全闭环的部分
 
@@ -164,6 +165,7 @@ OpenAI 官方文档指向两个核心事实：
 - 不做 transcript replay
 - `function_call_output` 先做本地上下文校验
 - stale `previous_response_id` 且本地有锚点时，优先对齐恢复
+- 本地锚点已对齐但 upstream 仍判 stale 时，仅自包含 payload 允许单次 drop-`previous_response_id` 重试
 - 无本地锚点时，如果 payload 自包含，则允许单次 drop-`previous_response_id` 重试
 - 无本地锚点且 payload 不自包含，则明确 fail-close
 

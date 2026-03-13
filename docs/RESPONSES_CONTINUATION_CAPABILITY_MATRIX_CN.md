@@ -62,10 +62,11 @@
 
 1. 本地 `function_call_output` 上下文校验
 2. stale `previous_response_id` 对齐
-3. 无本地锚点但 payload 自包含时的单次自包含重试
-4. 无锚点且不自包含时的明确 fail-close
-5. 会话级 `last_response_id` / `turn_state` 状态面
-6. 不做 transcript replay
+3. 本地锚点已对齐但 upstream 仍判 stale 时，仅自包含 payload 允许单次自包含重试
+4. 无本地锚点但 payload 自包含时的单次自包含重试
+5. 无锚点且不自包含时的明确 fail-close
+6. 会话级 `last_response_id` / `turn_state` 状态面
+7. 不做 transcript replay
 
 ### 3.2 当前明确不承诺的点
 
@@ -86,11 +87,13 @@
   - `drop_previous_response_id`
   - `drop_previous_response_id_self_contained`
   - `missing_local_anchor fail-close`
+  - `stale_local_anchor fail-close`
 - preflight ping fail：
   - `align_previous_response_id`
   - `drop_previous_response_id`
   - `drop_previous_response_id_self_contained`
   - `missing_local_anchor fail-close`
+  - `stale_local_anchor fail-close`
 
 当前这些统计还是进程内轻量计数，定位目的是：
 
