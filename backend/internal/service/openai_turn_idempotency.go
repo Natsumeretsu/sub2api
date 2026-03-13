@@ -174,7 +174,12 @@ func (c *openAIResponsesTurnCoordinator) begin(
 	now := time.Now()
 	expiresAt := now.Add(c.ttl)
 	lockedUntil := now.Add(c.processingTimeout)
-	fingerprint, err := BuildIdempotencyFingerprint(http.MethodPost, openAIResponsesTurnRoute, buildOpenAIResponsesTurnActorScope(groupID, desc), desc)
+	fingerprint, err := BuildIdempotencyFingerprint(
+		http.MethodPost,
+		openAIResponsesTurnRoute,
+		buildOpenAIResponsesTurnActorScope(groupID, desc),
+		openAIResponsesTurnFingerprintDescriptor(desc),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -334,6 +339,12 @@ func buildOpenAIResponsesTurnActorScope(groupID int64, desc OpenAIResponsesTurnD
 		parts = append(parts, "session:"+sessionHash)
 	}
 	return strings.Join(parts, "|")
+}
+
+func openAIResponsesTurnFingerprintDescriptor(desc OpenAIResponsesTurnDescriptor) OpenAIResponsesTurnDescriptor {
+	desc.RequestedTransport = ""
+	desc.RequestedCohort = ""
+	return desc
 }
 
 func retryAfterSeconds(lockedUntil *time.Time, now time.Time) int {

@@ -84,3 +84,39 @@ func TestOpenAIResponsesTurnCoordinator_DuplicateLifecycleAndReclaim(t *testing.
 	require.Equal(t, string(OpenAIResponsesTurnPhaseCompleted), duplicate.Phase)
 	require.Equal(t, "resp_completed_1", duplicate.State.ResponseID)
 }
+
+func TestOpenAIResponsesTurnCoordinator_IgnoresTransportAndCohortDriftInFingerprint(t *testing.T) {
+	repo := newInMemoryIdempotencyRepo()
+	coordinator := NewIdempotencyCoordinator(repo, DefaultIdempotencyConfig())
+	SetDefaultIdempotencyCoordinator(coordinator)
+	t.Cleanup(func() {
+		SetDefaultIdempotencyCoordinator(nil)
+	})
+
+	svc := &OpenAIGatewayService{}
+	ctx := context.Background()
+	desc := OpenAIResponsesTurnDescriptor{
+		SessionHash:        "session-hash-transport-drift",
+		PromptCacheKey:     "prompt-cache-key-transport-drift",
+		Model:              "gpt-5.4",
+		RequestedTransport: string(OpenAIUpstreamTransportAny),
+		RequestedCohort:    string(OpenAIContinuationCohortDegraded),
+		PayloadFingerprint: BuildOpenAIResponsesTurnPayloadFingerprint([]byte(`{"input":"hello"}`)),
+		Stream:             true,
+		TurnOrdinal:        1,
+	}
+
+	firstTicket, duplicate, err := svc.BeginOpenAIResponsesTurn(ctx, 12, "turn-key-drift", desc)
+	require.NoError(t, err)
+	require.NotNil(t, firstTicket)
+	require.Nil(t, duplicate)
+
+	strongDesc := desc
+	strongDesc.RequestedTransport = string(OpenAIUpstreamTransportResponsesWebsocketV2)
+	strongDesc.RequestedCohort = string(OpenAIContinuationCohortStrong)
+	secondTicket, duplicate, err := svc.BeginOpenAIResponsesTurn(ctx, 12, "turn-key-drift", strongDesc)
+	require.NoError(t, err)
+	require.Nil(t, secondTicket)
+	require.NotNil(t, duplicate)
+	require.Equal(t, string(OpenAIResponsesTurnPhaseProcessing), duplicate.Phase)
+}
