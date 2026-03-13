@@ -179,8 +179,30 @@ OpenAI 官方文档指向两个核心事实：
 - WS ingress turn 在 `wroteDownstream=true` 时，会显式阻断本轮重试，并记录对应的 duplicate-turn / emitted-bytes 计数
 - 调度器已显式区分 `continuation cohort / degraded cohort`，并把请求 cohort、选中 cohort 与 cohort fallback 作为决策字段输出，避免“只看 transport 看不见语义层级”
 - `prompt_cache_key` 已进入 scheduler 的 cache-affinity 输入；调度决策不再只看 availability 和 cohort，而会在同 cohort 候选里优先选择与当前 cache-affinity 更匹配的账号，把 continuation 亲和与缓存前缀亲和一起前置
+- OpenAI API-key relay 不再仅凭 `responses_websockets_v2_enabled=true` 或 `mode=passthrough` 被视作 strong continuation 账号；对于 API-key 账号，只有显式声明真实 `/responses` WS transport capability 时，resolver、scheduler 和 runtime capability 才会把该账号归入 `strong cohort`，否则一律视作 `degraded-only`
 - 非流式 `/responses` / `/responses/compact` 在 API key passthrough 和 OAuth SSE-to-JSON 两条链上，都已经补了协议完整性校验：空 body、半截 SSE、或 `response.completed/response.done` 后缺 final response payload 时，不再透传 `200` 成功，而是先构造成 `502` 的可重试协议级 failover，让 handler 侧优先走同账号/跨账号受控重试
 - admin/runtime continuation 快照已扩展到 `capability` 层，会按 group 汇总 `compact-capable / strong cohort / degraded-only` 账号，直接解释“为什么某个账号池当前只能 fast-fail”，避免把 `Team号池` 和 `Private` 这类分组混成一条结论
+
+### 4.1.1 当前 live capability 真相
+
+截至当前 fork 基线：
+
+- `Team号池`
+  - `12` 个可调度 OpenAI 账号
+  - `11` 个 compact-capable OAuth 账号
+  - `11` 个 `strong cohort` 账号
+  - `1` 个 `degraded-only` 账号：`PackyCode`
+- `Private`
+  - `1` 个可调度 OpenAI 账号
+  - 即 `PackyCode`
+  - `compact_capable_accounts = 0`
+  - `strong_cohort_accounts = 0`
+  - `degraded_only_accounts = 1`
+
+这条 live truth 的意义不是“账号切换天然就会抖”，而是：
+
+- 当前 `PackyCode` 这类 API-key relay 账号已经被明确排除出 strong continuation cohort
+- 如果 `PackyCode` 仍被误当成 strong account 参与切换，就会把本应稳定的 WS continuation 会话切碎，导致缓存命中骤降、输入 token 暴涨、并放大重复回答风险
 
 ### 4.2 暂不实施
 

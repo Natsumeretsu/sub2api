@@ -44,7 +44,7 @@
 | HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；但对强 continuation cohort，请求进入 handler 时会优先从共享会话状态回填 `previous_response_id`，并显式输出请求/选中 cohort | 以 handler 前置校验为主；强 cohort 会优先保链，弱会话仍可能 strip；一旦已经向下游写出字节，不再静默重放同一 turn | 请求体 + 共享会话状态 + 上游 | 不承诺与 WSv2 等价，但不再把强会话静默打回弱 continuation，也不再对已出字节的 turn 做隐式账号切换重放；若客户端未显式提供 `client_request_id`，则 turn key 退回为 `session_hash + previous_response_id + payload fingerprint` 派生键 |
 | HTTP `/v1/responses/compact` | `degraded` | compact 单独规范化 | 不做 replay merge；非流式成功响应若为空体、半截 SSE、或缺 final response payload，会先进入协议级 failover，再受控重试 | compact 请求体 + 上游 | 不能假装与普通 `/responses` 完全等价，也不能再把 `200 + 空 body` 直接回给客户端 |
 | WSv1 / legacy websocket | `degraded` | 不在当前 hardening 主战场 | 不承诺与 WSv2 同等级恢复 | 旧状态面 | 仅保守兼容 |
-| 非原生 upstream / 跨协议变换 continuation | `unsupported-by-contract` | 不列入当前强承诺面 | 不在当前 10 patch 的 correctness 保证范围内 | 具体 adapter 自身 | 后续需单独 matrix |
+| 非原生 upstream / 跨协议变换 continuation | `unsupported-by-contract` | 不列入当前强承诺面 | 不在当前 fork 的 continuation correctness 保证范围内 | 具体 adapter 自身 | 后续需单独 matrix |
 
 ## 3. 当前本地判断
 
@@ -69,6 +69,21 @@
 7. 共享缓存回填本地时尊重共享剩余 TTL，不额外放大本地寿命
 8. 当 `session_hash -> account_id` 缺失但共享 `last_response_id -> account_id` 仍在时，可恢复 sticky account 并回填会话粘连
 9. 不做 transcript replay
+
+### 3.1.1 账号能力分层的当前真相
+
+当前 fork 对 OpenAI 账号的强弱分层，已经不再只看配置愿望，而是区分“真实 transport capability”：
+
+- OAuth 账号默认可进入 `strong cohort`
+- API-key relay 账号默认只进入 `degraded-only`
+- API-key relay 只有显式声明真实 `/responses` WS transport capability 时，才允许进入 `strong cohort`
+
+当前 live capability 快照因此已经收敛为：
+
+- `Team号池`：`11 strong + 1 degraded-only(PackyCode)`
+- `Private`：`0 strong + 1 degraded-only(PackyCode)`
+
+这一步的目的，是阻断“把不支持 `/responses` WS transport 的 relay 账号误当成 strong account”这一类根因，避免账号切换时把强 continuation 会话切碎、把缓存亲和打掉、再把用户体验问题伪装成普通 fallback。
 
 ### 3.2 当前明确不承诺的点
 
