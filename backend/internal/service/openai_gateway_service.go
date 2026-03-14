@@ -45,6 +45,9 @@ const (
 	OpenAIParsedRequestBodyKey = "openai_parsed_request_body"
 	// OpenAIContinuationStrongCohortCtxKey 标记当前请求是否属于“强 continuation 会话”。
 	OpenAIContinuationStrongCohortCtxKey = "openai_continuation_strong_cohort"
+	// OpenAIContinuationResponseBoundCtxKey 标记当前请求是否带有 response-bound continuation，
+	// 即 previous_response_id 或共享 last_response 恢复出的明确续链锚点。
+	OpenAIContinuationResponseBoundCtxKey = "openai_continuation_response_bound"
 	// OpenAIContinuationPrevRecoveredCtxKey 标记当前请求的 previous_response_id 是否从共享会话状态回填。
 	OpenAIContinuationPrevRecoveredCtxKey = "openai_continuation_prev_recovered"
 	// OpenAICompactPreviousResponseKnownCtxKey 标记当前 remote compact 请求的 previous_response 能力是否已判定。
@@ -1136,6 +1139,12 @@ func ResolveOpenAIResponsesRequiredTransport(
 	if clientTransport == OpenAIClientTransportHTTP && responseBoundContinuation {
 		return OpenAIUpstreamTransportAny
 	}
+	// HTTP fallback on a sticky-only strong session still needs same-account affinity,
+	// but it must not be hard-filtered to WSv2-only or degraded-only pools will be
+	// incorrectly screened out before HTTP capability probing can run.
+	if clientTransport == OpenAIClientTransportHTTP && anchor.StickyAccountID > 0 {
+		return OpenAIUpstreamTransportAny
+	}
 	return ResolveOpenAIWSRequiredTransportForAnchor(anchor)
 }
 
@@ -1149,6 +1158,25 @@ func IsOpenAIContinuationStrongCohort(c *gin.Context) bool {
 	}
 	strong, _ := raw.(bool)
 	return strong
+}
+
+func IsOpenAIResponseBoundContinuation(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	raw, ok := c.Get(OpenAIContinuationResponseBoundCtxKey)
+	if !ok {
+		return false
+	}
+	bound, _ := raw.(bool)
+	return bound
+}
+
+func shouldBlockOpenAIStrongCohortTransportDegrade(c *gin.Context) bool {
+	if c == nil || isOpenAIRemoteCompactRequest(c) {
+		return false
+	}
+	return IsOpenAIContinuationStrongCohort(c) && IsOpenAIResponseBoundContinuation(c)
 }
 
 func GetOpenAICompactPreviousResponseCapability(c *gin.Context) (known bool, supported bool) {
@@ -2055,7 +2083,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// UX-first: 对已进入强 continuation cohort 的会话，在 HTTP 降级路径上尽量保留 previous_response_id，
 	// 避免静默打断续链并放大输入 token；其余弱会话仍保持原有过滤行为。
 	if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
-		if IsOpenAIContinuationStrongCohort(c) && !isOpenAIRemoteCompactRequest(c) {
+		if shouldBlockOpenAIStrongCohortTransportDegrade(c) {
 			RecordOpenAIWSContinuationStrongCohortDegradeBlocked()
 			logOpenAIWSModeInfo(
 				"strong_cohort_transport_degrade_blocked account_id=%d transport=%s client_transport=%s",

@@ -208,6 +208,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 	clientTransport := service.GetOpenAIClientTransport(c)
 	responseBoundContinuation := openAIHasResponseBoundContinuation(anchor, previousResponseID)
+	c.Set(service.OpenAIContinuationResponseBoundCtxKey, responseBoundContinuation)
 	requiredTransport := service.ResolveOpenAIResponsesRequiredTransport(
 		anchor,
 		remoteCompact,
@@ -567,13 +568,21 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				}
 				if isOpenAIRemoteCompactProtocolFailover(c, failoverErr) {
 					lastFailoverErr = failoverErr
+					h.gatewayService.SetObservedOpenAIResponsesCompactCapability(account, false, "runtime_protocol_incomplete")
 					reqLog.Warn("openai.remote_compact_protocol_failfast",
 						zap.Int64("account_id", account.ID),
 						zap.Int("upstream_status", failoverErr.StatusCode),
 						zap.String("upstream_message", strings.TrimSpace(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody))),
+						zap.Int("switch_count", switchCount),
+						zap.Int("max_switches", maxAccountSwitches),
 					)
-					h.handleFailoverExhausted(c, failoverErr, streamStarted)
-					return
+					failedAccountIDs[account.ID] = struct{}{}
+					if switchCount >= maxAccountSwitches {
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						return
+					}
+					switchCount++
+					continue
 				}
 				// 池模式：同账号重试
 				if failoverErr.RetryableOnSameAccount {

@@ -109,6 +109,33 @@ func TestResolveOpenAIResponsesCompactSupport_ProbeRejectsUnsupportedPreviousRes
 	require.Equal(t, "probe_unsupported_previous_response_id", source)
 }
 
+func TestResolveOpenAIResponsesCompactSupport_ProbeRejectsGenericHTTP4xx(t *testing.T) {
+	upstream := &openAICompactProbeUpstreamStub{
+		resp: &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(`{"detail":"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."}`)),
+		},
+	}
+	account := &Account{
+		ID:          18,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://example.invalid/v1",
+		},
+	}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+
+	supported, known, source, err := svc.ResolveOpenAIResponsesCompactSupport(context.Background(), account, "gpt-5.4")
+	require.NoError(t, err)
+	require.False(t, supported)
+	require.True(t, known)
+	require.Equal(t, "probe_http_rejected", source)
+}
+
 func TestOpenAIWSContinuationRuntimeSnapshot_UsesObservedCompactCapability(t *testing.T) {
 	account := Account{
 		ID:          18,

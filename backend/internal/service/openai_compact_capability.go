@@ -92,6 +92,10 @@ func (s *OpenAIGatewayService) setObservedOpenAIResponsesCompactCapability(accou
 	})
 }
 
+func (s *OpenAIGatewayService) SetObservedOpenAIResponsesCompactCapability(account *Account, supported bool, source string) {
+	s.setObservedOpenAIResponsesCompactCapability(account, supported, source)
+}
+
 func (s *OpenAIGatewayService) probeOpenAIResponsesCompactSupport(
 	ctx context.Context,
 	account *Account,
@@ -187,8 +191,13 @@ func classifyOpenAIResponsesCompactProbeResponse(statusCode int, body []byte) (s
 		}
 	}
 
-	if statusCode > 0 && statusCode < http.StatusInternalServerError {
-		return true, true, "probe_http_response"
+	if statusCode >= http.StatusOK && statusCode < http.StatusBadRequest {
+		return true, true, "probe_http_success"
+	}
+	if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
+		// Generic 4xx only proves the provider rejected the anchored compact probe;
+		// it is not strong enough evidence that previous_response-aware compact is usable.
+		return false, true, "probe_http_rejected"
 	}
 	return false, false, "probe_inconclusive"
 }

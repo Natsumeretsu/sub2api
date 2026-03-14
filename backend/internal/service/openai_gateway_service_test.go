@@ -631,12 +631,31 @@ func TestResolveOpenAIResponsesRequiredTransport(t *testing.T) {
 	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
 		StrongCohort: true,
 	}, false, OpenAIClientTransportHTTP, true))
-	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
-		StrongCohort: true,
+	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
+		StickyAccountID: 11,
+		StrongCohort:    true,
 	}, false, OpenAIClientTransportHTTP, false))
 	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
 		StrongCohort: true,
 	}, false, OpenAIClientTransportWS, true))
+}
+
+func TestShouldBlockOpenAIStrongCohortTransportDegrade(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(OpenAIContinuationStrongCohortCtxKey, true)
+	require.False(t, shouldBlockOpenAIStrongCohortTransportDegrade(c), "sticky-only strong session should not block degraded HTTP transport")
+
+	c.Set(OpenAIContinuationResponseBoundCtxKey, true)
+	require.True(t, shouldBlockOpenAIStrongCohortTransportDegrade(c), "response-bound continuation should still block silent degraded transport")
+
+	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c2.Set(OpenAIContinuationStrongCohortCtxKey, true)
+	c2.Set(OpenAIContinuationResponseBoundCtxKey, true)
+	c2.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+	require.False(t, shouldBlockOpenAIStrongCohortTransportDegrade(c2), "remote compact should bypass strong-cohort degrade blocking")
 }
 
 func TestGetOpenAICompactPreviousResponseCapability(t *testing.T) {

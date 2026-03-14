@@ -231,6 +231,65 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyRecoveredF
 	}
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_HTTPStickyOnlyStrongAnchorUsesDegradedAccount(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(10104)
+	account := Account{
+		ID:          21010,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Extra: map[string]any{
+			"openai_ws_force_http":            true,
+			"responses_websockets_v2_enabled": true,
+		},
+	}
+	cache := &stubGatewayCache{
+		sessionBindings: map[string]int64{
+			"openai:session_hash_http_sticky_only": account.ID,
+		},
+	}
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{account}},
+		cache:              cache,
+		cfg:                newOpenAIWSV2TestConfig(),
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	requiredTransport := ResolveOpenAIResponsesRequiredTransport(
+		OpenAIWSContinuationAnchor{
+			StickyAccountID: account.ID,
+			StrongCohort:    true,
+		},
+		false,
+		OpenAIClientTransportHTTP,
+		false,
+	)
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"session_hash_http_sticky_only",
+		"gpt-5.1",
+		nil,
+		requiredTransport,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, account.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+	require.True(t, decision.StickySessionHit)
+	require.Equal(t, OpenAIUpstreamTransportAny, requiredTransport)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyBusyKeepsSticky(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10100)
