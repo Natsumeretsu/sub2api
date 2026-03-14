@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -707,6 +708,7 @@ func (h *OpsHandler) ListRequestDetails(c *gin.Context) {
 			response.BadRequest(c, err.Error())
 			return
 		}
+		log.Printf("[WARN] Failed to list request details: %v", err)
 		response.Error(c, http.StatusInternalServerError, "Failed to list request details")
 		return
 	}

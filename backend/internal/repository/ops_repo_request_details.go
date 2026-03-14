@@ -233,7 +233,6 @@ WITH combined AS (
   WHERE o.created_at >= $1 AND o.created_at < $2
     AND COALESCE(o.status_code, 0) >= 400
 )
-)
 `, compactChainSelect, compactChainJoin)
 
 	countQuery := fmt.Sprintf(`%s SELECT COUNT(1) FROM combined %s`, cte, where)
