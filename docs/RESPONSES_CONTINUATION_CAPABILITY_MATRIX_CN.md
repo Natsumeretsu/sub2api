@@ -41,7 +41,7 @@
 | WSv2 `ctx_pool/passthrough` 普通 turn | `strong` | 默认保留；必要时可对齐或单次降级 | 文本 turn 可做受控恢复 | 本地 turn + 会话状态 + 连接提示 | 当前主承诺面 |
 | WSv2 `store=false` + `function_call_output` | `strong` | 优先对齐；必要时单次 fresh-conn 恢复 | 本地校验 -> 有锚点恢复 -> 自包含单次重试 -> 否则 fail-close | `last_response_id`、`turn_state`、连接亲和 | 当前 continuation hardening 主覆盖面；会话状态从共享缓存回填本地时会跟随共享剩余 TTL |
 | WSv2 `store=true` | `degraded-strong` | 允许依赖上游 history | 本地仍做基础校验，但更偏透传 | 上游 history + 本地辅助状态 | 语义更依赖上游 |
-| HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；对强 continuation cohort，请求进入 handler 时仍会优先从共享会话状态回填 `previous_response_id`，但 anchored HTTP turn 不再先被 `requiredTransport=WSv2` 提前筛空，而是先选到同账号 candidate 再判断该 HTTP surface 是否真的支持该参数 | 以 handler 前置校验为主；强 cohort 只会在 HTTP surface 明确支持 `previous_response_id` 时继续保链，否则直接显式 `503` 软中断；若 service 已拿到 structured upstream 4xx 但尚未写响应，则 handler fallback 会优先透传结构化 4xx，只有 `Unsupported parameter: previous_response_id` 这类 transport 能力缺口会被提升成软中断；弱会话仍可能 strip；一旦已经向下游写出字节，不再静默重放同一 turn | 请求体 + 共享会话状态 + 账号 capability + 上游 | 不承诺与 WSv2 等价，但不再把 strong anchored turn 静默打进不支持 `previous_response_id` 的 HTTP fallback，也不再把这种 anchored HTTP 请求先误判成 `no available OpenAI accounts`；若客户端未显式提供 `client_request_id`，则 turn key 退回为 `session_hash + previous_response_id + payload fingerprint` 派生键 |
+| HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；对强 continuation cohort，请求进入 handler 时仍会优先从共享会话状态回填 `previous_response_id`，但 anchored HTTP turn 不再先被 `requiredTransport=WSv2` 提前筛空，而是先选到同账号 candidate 再判断该 HTTP surface 是否真的支持该参数 | 以 handler 前置校验为主；强 cohort 只会在 HTTP surface 明确支持 `previous_response_id` 时继续保链，否则直接显式 `503` 软中断；若 service 已拿到 structured upstream 4xx 但尚未写响应，则 handler fallback 会优先透传结构化 4xx，只有 `Unsupported parameter: previous_response_id` 这类 transport 能力缺口会被提升成软中断；弱会话仍可能 strip；一旦已经向下游写出字节，不再静默重放同一 turn；对于 gateway 侧 WS bridge 选中的 degraded HTTP surface，若普通 `/responses` 明确不支持 `previous_response_id`，当前 fork 会退回本地 replay input + 稳定 `prompt_cache_key`，而不是继续把 anchored turn 原样上推 | 请求体 + 共享会话状态 + 账号 capability + 上游 | 不承诺与 WSv2 等价，但不再把 strong anchored turn 静默打进不支持 `previous_response_id` 的 HTTP fallback，也不再把这种 anchored HTTP 请求先误判成 `no available OpenAI accounts`；若客户端未显式提供 `client_request_id`，则 turn key 退回为 `session_hash + previous_response_id + payload fingerprint` 派生键 |
 | HTTP `/v1/responses/compact` | `degraded` | compact 单独规范化 | 不做 replay merge；非流式成功响应若为空体、半截 SSE、或缺 final response payload，会先进入协议级 failover，再受控重试 | compact 请求体 + 上游 | 不能假装与普通 `/responses` 完全等价，也不能再把 `200 + 空 body` 直接回给客户端 |
 | WSv1 / legacy websocket | `degraded` | 不在当前 hardening 主战场 | 不承诺与 WSv2 同等级恢复 | 旧状态面 | 仅保守兼容 |
 | 非原生 upstream / 跨协议变换 continuation | `unsupported-by-contract` | 不列入当前强承诺面 | 不在当前 fork 的 continuation correctness 保证范围内 | 具体 adapter 自身 | 后续需单独 matrix |
@@ -78,10 +78,11 @@
 - API-key relay 账号默认只进入 `degraded-only`
 - API-key relay 只有显式声明真实 `/responses` WS transport capability 时，才允许进入 `strong cohort`
 
-当前 live capability 快照因此已经收敛为：
+当前 live capability 不能再用硬编码账号数表达，而应按 runtime panel 与数据库实时读取：
 
-- `Team号池`：`0 strong + 1 degraded-only(RightCode schedulable)`；`PackyCode` 当前存在关联但 `schedulable=false`
-- `Private`：`0 strong + 1 degraded-only(RightCode schedulable)`；`PackyCode` 当前存在关联但 `schedulable=false`
+- `Team号池` / `Private` 当前 scheduler 候选以 API-key relay 为主，不再能从“系统里存在 OAuth 账号”直接推出 “group 内存在 strong cohort”
+- 2026-03-14 的本地 live 数据已验证：`Team号池` 与 `Private` 的 group membership 里实际包含 `PackyCode`、`RightCode`、`Giot(Free)`；其中 `Giot(Free)` 当前 `schedulable=false`
+- 因此 live 的首要问题已经不是“强账号选错”，而是 **当 group 里只剩 degraded HTTP surface 时，gateway 如何避免把 anchored continuation 打碎**
 
 这一步的目的，是阻断“把不支持 `/responses` WS transport 的 relay 账号误当成 strong account”这一类根因，避免账号切换时把强 continuation 会话切碎、把缓存亲和打掉、再把用户体验问题伪装成普通 fallback。
 

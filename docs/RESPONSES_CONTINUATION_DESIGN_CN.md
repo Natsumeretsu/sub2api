@@ -183,27 +183,17 @@ OpenAI 官方文档指向两个核心事实：
 - 调度器已显式区分 `continuation cohort / degraded cohort`，并把请求 cohort、选中 cohort 与 cohort fallback 作为决策字段输出，避免“只看 transport 看不见语义层级”
 - `prompt_cache_key` 已进入 scheduler 的 cache-affinity 输入；调度决策不再只看 availability 和 cohort，而会在同 cohort 候选里优先选择与当前 cache-affinity 更匹配的账号，把 continuation 亲和与缓存前缀亲和一起前置
 - OpenAI API-key relay 不再仅凭 `responses_websockets_v2_enabled=true` 或 `mode=passthrough` 被视作 strong continuation 账号；对于 API-key 账号，只有显式声明真实 `/responses` WS transport capability 时，resolver、scheduler 和 runtime capability 才会把该账号归入 `strong cohort`，否则一律视作 `degraded-only`
+- 当 `GET /v1/responses` 已经进入 gateway 侧 WS bridge，但 selected account 的普通 HTTP `/responses` surface 明确不支持 `previous_response_id` 时，fork 不再把 anchored turn 原样上推换回 `Unsupported parameter: previous_response_id`；当前实现会从上一轮 `response.completed.response.output` 回收 assistant 输出，和上一轮已知 input 一起组成本地 replay input，注入稳定 `prompt_cache_key`，然后剥离 `previous_response_id` 再发给 HTTP degraded surface。这样修的是 degraded surface 的真实 continuation 机制，而不是继续赌该 surface 会接受 anchored 参数
 - 非流式 `/responses` / `/responses/compact` 在 API key passthrough 和 OAuth SSE-to-JSON 两条链上，都已经补了协议完整性校验：空 body、半截 SSE、或 `response.completed/response.done` 后缺 final response payload 时，不再透传 `200` 成功，而是先构造成 `502` 的可重试协议级 failover，让 handler 侧优先走同账号/跨账号受控重试
 - admin/runtime continuation 快照已扩展到 `capability` 层，会按 group 汇总 `compact-capable / strong cohort / degraded-only` 账号，直接解释“为什么某个账号池当前只能 fast-fail”，避免把 `Team号池` 和 `Private` 这类分组混成一条结论
 
 ### 4.1.1 当前 live capability 真相
 
-截至当前 fork 基线：
+截至当前 fork 基线，更可靠的 live 真相不再写死为固定账号数，而是：
 
-- `Team号池`
-  - 当前只有 `1` 个可调度 OpenAI 账号
-  - 即 `RightCode`
-  - `compact_capable_accounts = 1`
-  - `strong_cohort_accounts = 0`
-  - `degraded_only_accounts = 1`
-- `Private`
-  - `1` 个可调度 OpenAI 账号
-  - 即 `RightCode`
-  - `compact_capable_accounts = 1`
-  - `strong_cohort_accounts = 0`
-  - `degraded_only_accounts = 1`
-
-同时，`PackyCode` 仍然存在于 `Team号池` 与 `Private` 的账号关联里，但当前 live 上 `PackyCode.schedulable = false`，因此不会进入本轮 runtime capability 统计或 scheduler 候选。
+- `Team号池` 与 `Private` 的 OpenAI 候选，必须以 runtime panel 和 `accounts/account_groups` 实时查询为准，不能再沿用旧的 “11 个 OAuth strong” 或 “只有 1 个 RightCode” 这类快照
+- 2026-03-14 的本地 live 数据已经明确：全局存在多枚 OpenAI OAuth 账号，但 `Team号池` / `Private` 当前实际绑定到 scheduler 候选里的，是 `PackyCode`、`RightCode`、`Giot(Free)` 这一类 API-key relay 账号；其中 `Giot(Free)` 当前 `schedulable=false`
+- 因此用户看到的 “WS 退到 HTTP fallback / anchored turn 撞 `Unsupported parameter: previous_response_id` / 重复回答 / cache 掉得厉害” 不能再误判成 “OAuth strong 和 API-key degraded 混跑”；更准确地说，是 **当前分组候选本身就主要落在 degraded API-key surface 上**
 
 这条 live truth 的意义不是“账号切换天然就会抖”，而是：
 
