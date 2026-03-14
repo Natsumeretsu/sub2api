@@ -83,6 +83,7 @@
 - `Team号池` / `Private` 当前 scheduler 候选以 API-key relay 为主，不再能从“系统里存在 OAuth 账号”直接推出 “group 内存在 strong cohort”
 - 2026-03-14 的本地 live 数据已验证：`Team号池` 与 `Private` 的 group membership 里实际包含 `PackyCode`、`RightCode`、`Giot(Free)`；其中 `Giot(Free)` 当前 `schedulable=false`
 - 因此 live 的首要问题已经不是“强账号选错”，而是 **当 group 里只剩 degraded HTTP surface 时，gateway 如何避免把 anchored continuation 打碎**
+- 同一条 live 主线还证明了另一件事：`degraded` 不是单一能力面。`PackyCode` 与 `RightCode` 都属于 `degraded-only`，但 `PackyCode` 的 HTTP `/responses` `stream=true` surface 已被实锤为会在未收到 `[DONE]` 时提前结束，而 `RightCode` 尚未观测到同类问题。因此 scheduler 不能只看 `strong/degraded cohort`，还必须继续细分 `HTTP streaming capable / incapable / unknown`。当前 fork 已把这类观测写入共享 gateway cache，因此一旦某个账号被观测为 `http_streaming_incapable`，同一 Redis 观测窗口内的新进程和重启后的实例都会优先避开该账号，而不是每次重启都重新踩一次
 
 这一步的目的，是阻断“把不支持 `/responses` WS transport 的 relay 账号误当成 strong account”这一类根因，避免账号切换时把强 continuation 会话切碎、把缓存亲和打掉、再把用户体验问题伪装成普通 fallback。
 

@@ -204,6 +204,7 @@ OpenAI 官方文档指向两个核心事实：
   - `/responses` HTTP `previous_response_id` capability
   - `/responses/compact` HTTP `previous_response_id` capability
 - 当前 runtime smoke 已进一步确认：`RightCode` 与 `PackyCode` 都属于 `degraded-only`，但只有 `RightCode` 的 `/responses/compact` HTTP surface 已通过 runtime probe 被确认支持 `previous_response_id`；`PackyCode` 当前仍被归为 compact-incapable
+- 2026-03-14 的 live 继续证明，`PackyCode` 的问题不只是 compact，而是 HTTP `/responses` `stream=true` surface 本身不稳定：同一账号会在未发送 `[DONE]` 时提前结束，触发 `stream_missing_done`、重复回答风险和缓存收益下跌。当前 fork 因此不再只靠进程内 `sync.Map` 临时记住“坏流式账号”，而是把 `openai_http_streaming_capability` 观测写入共享 gateway cache，并在 scheduler 启动或重启后优先读取这份共享 TTL 观测。第一轮 fresh deploy/冷实例 smoke 会把 `PackyCode` 记成 `http_streaming_incapable`；第二轮在同一 Redis 观测仍有效时，freshly restarted 进程会在第一跳就把 `PackyCode` 视为不可用流式候选，因此 `duplicate_turn_retry_blocked_after_emit_total` 与 `emitted_bytes_before_retry_total` 可以重新保持在 `0`
 - `previous_response_id -> account` 的粘连现在被视为 **账号亲和提示**，而不是 `WSv2` 专属能力：即使 selected account 是 degraded-only，只要请求仍需要保住同账号 continuation/cache affinity，scheduler 仍会先按 response/account 绑定尝试命中该账号，再由后续 transport/capability 分层去判断是否允许保锚点、软中断，或继续走 degraded path
 - 如果继续把 “有锚点的 compact 请求” 强行按 `WSv2 strong cohort` 去调度，就会在 scheduler 阶段直接把 `RightCode` 筛空，表现成 `503 no available OpenAI accounts`
 - `compact capability` 也不能只靠 “route 存在 / 没报 `unsupported previous_response_id`” 做正面判断。当前 probe 已收紧成：
