@@ -414,30 +414,54 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.RecordOpenAIWSContinuationCacheAffinitySelection()
 		}
 		account := selection.Account
-		if isOpenAIRemoteCompactPath(c) && !account.SupportsOpenAIResponsesCompact() {
-			failoverErr := buildOpenAIRemoteCompactUnsupportedFailover(account)
-			lastFailoverErr = failoverErr
-			failedAccountIDs[account.ID] = struct{}{}
-			if switchCount >= maxAccountSwitches {
-				reqLog.Warn("openai.remote_compact_account_unsupported",
+		if isOpenAIRemoteCompactPath(c) {
+			compactSupported, compactKnown, compactSource, compactProbeErr := h.gatewayService.ResolveOpenAIResponsesCompactSupport(
+				c.Request.Context(),
+				account,
+				reqModel,
+			)
+			if compactProbeErr != nil {
+				reqLog.Warn("openai.remote_compact_capability_probe_failed",
 					zap.Int64("account_id", account.ID),
 					zap.String("account_name", account.Name),
 					zap.String("account_type", account.Type),
 					zap.String("base_url", account.GetOpenAIBaseURL()),
+					zap.Error(compactProbeErr),
 				)
-				h.handleFailoverExhausted(c, failoverErr, streamStarted)
-				return
 			}
-			switchCount++
-			reqLog.Warn("openai.remote_compact_account_unsupported_switching",
-				zap.Int64("account_id", account.ID),
-				zap.String("account_name", account.Name),
-				zap.String("account_type", account.Type),
-				zap.String("base_url", account.GetOpenAIBaseURL()),
-				zap.Int("switch_count", switchCount),
-				zap.Int("max_switches", maxAccountSwitches),
-			)
-			continue
+			if compactKnown && !compactSupported {
+				failoverErr := buildOpenAIRemoteCompactUnsupportedFailover(account)
+				lastFailoverErr = failoverErr
+				failedAccountIDs[account.ID] = struct{}{}
+				if switchCount >= maxAccountSwitches {
+					reqLog.Warn("openai.remote_compact_account_unsupported",
+						zap.Int64("account_id", account.ID),
+						zap.String("account_name", account.Name),
+						zap.String("account_type", account.Type),
+						zap.String("base_url", account.GetOpenAIBaseURL()),
+						zap.String("compact_support_source", compactSource),
+					)
+					h.handleFailoverExhausted(c, failoverErr, streamStarted)
+					return
+				}
+				switchCount++
+				reqLog.Warn("openai.remote_compact_account_unsupported_switching",
+					zap.Int64("account_id", account.ID),
+					zap.String("account_name", account.Name),
+					zap.String("account_type", account.Type),
+					zap.String("base_url", account.GetOpenAIBaseURL()),
+					zap.Int("switch_count", switchCount),
+					zap.Int("max_switches", maxAccountSwitches),
+					zap.String("compact_support_source", compactSource),
+				)
+				continue
+			}
+			if compactKnown {
+				reqLog = reqLog.With(
+					zap.Bool("remote_compact_supported", compactSupported),
+					zap.String("remote_compact_support_source", compactSource),
+				)
+			}
 		}
 		if openAIShouldBlockHTTPPreviousResponseFallback(
 			anchor,

@@ -120,9 +120,13 @@ func TestSupportsOpenAIResponsesCompact(t *testing.T) {
 	t.Run("oauth accounts support compact by default", func(t *testing.T) {
 		account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI}
 		require.True(t, account.SupportsOpenAIResponsesCompact())
+		supported, decided, source := account.ResolveOpenAIResponsesCompactCapability()
+		require.True(t, supported)
+		require.True(t, decided)
+		require.Equal(t, "oauth_default", source)
 	})
 
-	t.Run("apikey accounts require explicit opt in", func(t *testing.T) {
+	t.Run("apikey accounts are undecided without explicit signal", func(t *testing.T) {
 		account := &Account{
 			Type:     AccountTypeAPIKey,
 			Platform: PlatformOpenAI,
@@ -131,6 +135,10 @@ func TestSupportsOpenAIResponsesCompact(t *testing.T) {
 			},
 		}
 		require.False(t, account.SupportsOpenAIResponsesCompact())
+		supported, decided, source := account.ResolveOpenAIResponsesCompactCapability()
+		require.False(t, supported)
+		require.False(t, decided)
+		require.Equal(t, "", source)
 	})
 
 	t.Run("apikey accounts honor bool credential", func(t *testing.T) {
@@ -143,6 +151,10 @@ func TestSupportsOpenAIResponsesCompact(t *testing.T) {
 			},
 		}
 		require.True(t, account.SupportsOpenAIResponsesCompact())
+		supported, decided, source := account.ResolveOpenAIResponsesCompactCapability()
+		require.True(t, supported)
+		require.True(t, decided)
+		require.Equal(t, "credential:responses_compact_supported", source)
 	})
 
 	t.Run("apikey accounts honor string credential", func(t *testing.T) {
@@ -155,6 +167,21 @@ func TestSupportsOpenAIResponsesCompact(t *testing.T) {
 			},
 		}
 		require.True(t, account.SupportsOpenAIResponsesCompact())
+	})
+
+	t.Run("apikey accounts honor extra capability", func(t *testing.T) {
+		account := &Account{
+			Type:     AccountTypeAPIKey,
+			Platform: PlatformOpenAI,
+			Extra: map[string]any{
+				"openai_apikey_responses_compact_supported": true,
+			},
+		}
+		require.True(t, account.SupportsOpenAIResponsesCompact())
+		supported, decided, source := account.ResolveOpenAIResponsesCompactCapability()
+		require.True(t, supported)
+		require.True(t, decided)
+		require.Equal(t, "extra:openai_apikey_responses_compact_supported", source)
 	})
 }
 

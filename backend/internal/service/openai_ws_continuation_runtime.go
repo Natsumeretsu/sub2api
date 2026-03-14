@@ -152,7 +152,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSContinuationCapabilitySnapshot(ctx c
 		if account.IsOpenAIApiKey() {
 			acc.snapshot.APIKeySchedulableAccounts++
 		}
-		if account.SupportsOpenAIResponsesCompact() {
+		if s.SupportsOpenAIResponsesCompactForRuntime(&account) {
 			acc.snapshot.CompactCapableAccounts++
 			acc.snapshot.CompactCapableAccountNames = append(acc.snapshot.CompactCapableAccountNames, account.Name)
 		} else {
@@ -175,7 +175,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSContinuationCapabilitySnapshot(ctx c
 			continue
 		}
 		snapshot.GlobalTotalOpenAIAccounts++
-		if account.SupportsOpenAIResponsesCompact() {
+		if s.SupportsOpenAIResponsesCompactForRuntime(&account) {
 			snapshot.GlobalCompactCapableAccounts++
 		} else {
 			snapshot.GlobalCompactIncapableAccounts++

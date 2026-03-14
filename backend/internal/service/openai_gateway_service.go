@@ -332,10 +332,11 @@ type OpenAIGatewayService struct {
 	openaiWSPassthroughDialer     openAIWSClientDialer
 	openaiAccountStats            *openAIAccountRuntimeStats
 
-	openaiWSFallbackUntil sync.Map // key: int64(accountID), value: time.Time
-	openaiWSRetryMetrics  openAIWSRetryMetrics
-	responseHeaderFilter  *responseheaders.CompiledHeaderFilter
-	codexSnapshotThrottle *accountWriteThrottle
+	openaiWSFallbackUntil   sync.Map // key: int64(accountID), value: time.Time
+	openaiWSRetryMetrics    openAIWSRetryMetrics
+	openaiCompactCapability sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
+	responseHeaderFilter    *responseheaders.CompiledHeaderFilter
+	codexSnapshotThrottle   *accountWriteThrottle
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
@@ -3936,6 +3937,13 @@ func (s *OpenAIGatewayService) replaceModelInSSEBody(body, fromModel, toModel st
 }
 
 func (s *OpenAIGatewayService) validateUpstreamBaseURL(raw string) (string, error) {
+	if s == nil || s.cfg == nil {
+		normalized, err := urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{})
+		if err != nil {
+			return "", fmt.Errorf("invalid base_url: %w", err)
+		}
+		return normalized, nil
+	}
 	if s.cfg != nil && !s.cfg.Security.URLAllowlist.Enabled {
 		normalized, err := urlvalidator.ValidateURLFormat(raw, s.cfg.Security.URLAllowlist.AllowInsecureHTTP)
 		if err != nil {

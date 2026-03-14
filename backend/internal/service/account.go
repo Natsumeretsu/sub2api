@@ -795,19 +795,51 @@ func (a *Account) GetOpenAIBaseURL() string {
 }
 
 func (a *Account) SupportsOpenAIResponsesCompact() bool {
-	if !a.IsOpenAI() {
+	supported, decided, _ := a.ResolveOpenAIResponsesCompactCapability()
+	if !decided {
 		return false
+	}
+	return supported
+}
+
+func (a *Account) ResolveOpenAIResponsesCompactCapability() (supported bool, decided bool, source string) {
+	if !a.IsOpenAI() {
+		return false, true, "non_openai"
 	}
 	if a.IsOpenAIOAuth() {
-		return true
+		return true, true, "oauth_default"
 	}
 	if !a.IsOpenAIApiKey() {
-		return false
+		return false, true, "non_apikey"
 	}
-	if enabled, ok := a.getBoolCredential("responses_compact_supported"); ok {
-		return enabled
+	for _, key := range a.openAIResponsesCompactCapabilityKeys() {
+		if enabled, ok := a.getBoolCredential(key); ok {
+			return enabled, true, "credential:" + key
+		}
+		if enabled, ok := a.getBoolExtra(key); ok {
+			return enabled, true, "extra:" + key
+		}
 	}
-	return false
+	return false, false, ""
+}
+
+func (a *Account) openAIResponsesCompactCapabilityKeys() []string {
+	keys := make([]string, 0, 5)
+	if a != nil {
+		switch {
+		case a.IsOpenAIOAuth():
+			keys = append(keys, "openai_oauth_responses_compact_supported")
+		case a.IsOpenAIApiKey():
+			keys = append(keys, "openai_apikey_responses_compact_supported")
+		}
+	}
+	keys = append(keys,
+		"openai_responses_compact_supported",
+		"responses_compact_supported",
+		"openai_compact_supported",
+		"compact_supported",
+	)
+	return keys
 }
 
 func (a *Account) SupportsOpenAIResponsesWebSocketTransport() bool {
