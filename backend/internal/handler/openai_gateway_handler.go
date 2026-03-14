@@ -694,6 +694,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				User:              apiKey.User,
 				Account:           account,
 				Subscription:      subscription,
+				ClientRequestID:   openAIResponsesClientRequestID(c),
 				UserAgent:         userAgent,
 				IPAddress:         clientIP,
 				ForceCacheBilling: forceCacheBilling,
@@ -1090,14 +1091,15 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 		h.submitUsageRecordTask(func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-				Result:        result,
-				APIKey:        apiKey,
-				User:          apiKey.User,
-				Account:       account,
-				Subscription:  subscription,
-				UserAgent:     userAgent,
-				IPAddress:     clientIP,
-				APIKeyService: h.apiKeyService,
+				Result:          result,
+				APIKey:          apiKey,
+				User:            apiKey.User,
+				Account:         account,
+				Subscription:    subscription,
+				ClientRequestID: openAIResponsesClientRequestID(c),
+				UserAgent:       userAgent,
+				IPAddress:       clientIP,
+				APIKeyService:   h.apiKeyService,
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.messages"),
@@ -1657,6 +1659,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					User:              apiKey.User,
 					Account:           account,
 					Subscription:      subscription,
+					ClientRequestID:   openAIResponsesClientRequestID(c),
 					UserAgent:         userAgent,
 					IPAddress:         clientIP,
 					ForceCacheBilling: wsForceCacheBilling,

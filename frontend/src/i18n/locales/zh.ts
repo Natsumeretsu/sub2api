@@ -3520,7 +3520,16 @@ export default {
           duration: '耗时',
           status: '状态码',
           requestId: '请求ID',
+          attribution: '归因',
           actions: '操作'
+        },
+        attribution: {
+          bridge: '桥接',
+          compact: 'Compact',
+          input: '输入',
+          cacheRead: '缓存读取',
+          replay: '回放',
+          promptCacheKey: '缓存键来源'
         }
       },
       alertEvents: {

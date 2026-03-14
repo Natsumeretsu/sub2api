@@ -3339,6 +3339,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	var markBrokenIngressLease func(*openAIWSConnLease, string)
+	var currentTurnTokenAttribution *OpenAITurnTokenAttribution
 
 	sendAndRelay := func(
 		turn int,
@@ -3351,6 +3352,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	) (*OpenAIForwardResult, error) {
 		turnStart := time.Now()
 		if useHTTPBridge {
+			bridgeAttribution := cloneOpenAITurnTokenAttribution(currentTurnTokenAttribution)
 			bridgeBody, bridgeErr := buildOpenAIWSHTTPBridgeRequestBody(payload)
 			if bridgeErr != nil {
 				return nil, wrapOpenAIWSIngressTurnError(
@@ -3396,7 +3398,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if requestErr != nil {
 				return emitBridgeFailure(requestErr.Error())
 			}
-			return s.relayOpenAIWSHTTPBridgeStream(
+			result, relayErr := s.relayOpenAIWSHTTPBridgeStream(
 				ctx,
 				resp,
 				account,
@@ -3405,6 +3407,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				turnStart,
 				writeClientMessage,
 			)
+			if result != nil {
+				result.TokenAttribution = mergeOpenAITurnTokenAttribution(result.TokenAttribution, bridgeAttribution)
+			}
+			return result, relayErr
 		}
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
@@ -4145,13 +4151,19 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			currentTurnReplayInput = nextReplayInput
 			currentTurnReplayInputExists = nextReplayInputExists
 		}
+		currentTurnTokenAttribution = nil
 		if useHTTPBridge {
 			bridgePromptCacheKey := strings.TrimSpace(openAIWSPayloadStringFromRaw(currentPayload, "prompt_cache_key"))
+			bridgePromptCacheKeySource := "payload"
 			if bridgePromptCacheKey == "" {
 				if lastTurnPromptCacheKey != "" {
 					bridgePromptCacheKey = lastTurnPromptCacheKey
+					bridgePromptCacheKeySource = "last_turn"
 				} else if sessionHash != "" {
 					bridgePromptCacheKey = sessionHash
+					bridgePromptCacheKeySource = "session_hash"
+				} else {
+					bridgePromptCacheKeySource = "none"
 				}
 			}
 			preserveBridgePreviousResponseID := currentPreviousResponseID == ""
@@ -4218,6 +4230,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			if replayApplied {
 				currentPreviousResponseID = ""
+			}
+			replayItems, replayBytes := measureOpenAIReplayInput(currentTurnReplayInput, currentTurnReplayInputExists)
+			currentTurnTokenAttribution = &OpenAITurnTokenAttribution{
+				BridgeUsed:           true,
+				BridgeMode:           "ws_http_bridge",
+				BridgeSource:         normalizeOpenAIWSLogValue(string(wsDecision.Transport)),
+				ReplayInputItems:     replayItems,
+				ReplayInputBytes:     replayBytes,
+				ReplayInputApplied:   replayApplied,
+				PromptCacheKeyUsed:   bridgePromptCacheKey != "",
+				PromptCacheKeySource: normalizeOpenAIWSLogValue(bridgePromptCacheKeySource),
 			}
 			currentPayload = preparedPayload
 			currentPayloadBytes = len(preparedPayload)

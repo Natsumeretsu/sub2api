@@ -3347,7 +3347,16 @@ export default {
           duration: 'Duration',
           status: 'Status',
           requestId: 'Request ID',
+          attribution: 'Attribution',
           actions: 'Actions'
+        },
+        attribution: {
+          bridge: 'Bridge',
+          compact: 'Compact',
+          input: 'Input',
+          cacheRead: 'Cache read',
+          replay: 'Replay',
+          promptCacheKey: 'Prompt cache key'
         }
       },
       alertEvents: {

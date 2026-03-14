@@ -241,15 +241,16 @@ type OpenAIForwardResult struct {
 	ServiceTier *string
 	// ReasoningEffort is extracted from request body (reasoning.effort) or derived from model suffix.
 	// Stored for usage records display; nil means not provided / not applicable.
-	ReasoningEffort *string
-	Stream          bool
-	OpenAIWSMode    bool
-	ResponseHeaders http.Header
-	ReplayInput     []json.RawMessage
-	ReplayInputSet  bool
-	PromptCacheKey  string
-	Duration        time.Duration
-	FirstTokenMs    *int
+	ReasoningEffort  *string
+	Stream           bool
+	OpenAIWSMode     bool
+	ResponseHeaders  http.Header
+	ReplayInput      []json.RawMessage
+	ReplayInputSet   bool
+	PromptCacheKey   string
+	TokenAttribution *OpenAITurnTokenAttribution
+	Duration         time.Duration
+	FirstTokenMs     *int
 }
 
 type OpenAIWSRetryMetricsSnapshot struct {
@@ -2481,17 +2482,33 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	reasoningEffort := extractOpenAIReasoningEffort(reqBody, originalModel)
 	serviceTier := extractOpenAIServiceTier(reqBody)
+	turnAttribution := &OpenAITurnTokenAttribution{
+		CompactRequest: isOpenAIResponsesCompactPath(c),
+	}
+	if promptCacheKey != "" {
+		turnAttribution.PromptCacheKeyUsed = true
+		turnAttribution.PromptCacheKeySource = "payload"
+	}
+	if httpStreamBridge.UseBridge {
+		turnAttribution.BridgeUsed = true
+		turnAttribution.BridgeMode = "http_stream_bridge"
+		turnAttribution.BridgeSource = strings.TrimSpace(httpStreamBridge.Source)
+	}
+	if !hasOpenAITurnTokenAttributionData(turnAttribution) {
+		turnAttribution = nil
+	}
 
 	return &OpenAIForwardResult{
-		RequestID:       resp.Header.Get("x-request-id"),
-		Usage:           *usage,
-		Model:           originalModel,
-		ServiceTier:     serviceTier,
-		ReasoningEffort: reasoningEffort,
-		Stream:          clientRequestedStream,
-		OpenAIWSMode:    false,
-		Duration:        time.Since(startTime),
-		FirstTokenMs:    firstTokenMs,
+		RequestID:        resp.Header.Get("x-request-id"),
+		Usage:            *usage,
+		Model:            originalModel,
+		ServiceTier:      serviceTier,
+		ReasoningEffort:  reasoningEffort,
+		Stream:           clientRequestedStream,
+		OpenAIWSMode:     false,
+		TokenAttribution: turnAttribution,
+		Duration:         time.Since(startTime),
+		FirstTokenMs:     firstTokenMs,
 	}, nil
 }
 
@@ -2671,17 +2688,33 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	if usage == nil {
 		usage = &OpenAIUsage{}
 	}
+	turnAttribution := &OpenAITurnTokenAttribution{
+		CompactRequest: isOpenAIResponsesCompactPath(c),
+	}
+	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); promptCacheKey != "" {
+		turnAttribution.PromptCacheKeyUsed = true
+		turnAttribution.PromptCacheKeySource = "payload"
+	}
+	if httpStreamBridge.UseBridge {
+		turnAttribution.BridgeUsed = true
+		turnAttribution.BridgeMode = "http_stream_bridge"
+		turnAttribution.BridgeSource = strings.TrimSpace(httpStreamBridge.Source)
+	}
+	if !hasOpenAITurnTokenAttributionData(turnAttribution) {
+		turnAttribution = nil
+	}
 
 	return &OpenAIForwardResult{
-		RequestID:       resp.Header.Get("x-request-id"),
-		Usage:           *usage,
-		Model:           reqModel,
-		ServiceTier:     extractOpenAIServiceTierFromBody(body),
-		ReasoningEffort: reasoningEffort,
-		Stream:          clientRequestedStream,
-		OpenAIWSMode:    false,
-		Duration:        time.Since(startTime),
-		FirstTokenMs:    firstTokenMs,
+		RequestID:        resp.Header.Get("x-request-id"),
+		Usage:            *usage,
+		Model:            reqModel,
+		ServiceTier:      extractOpenAIServiceTierFromBody(body),
+		ReasoningEffort:  reasoningEffort,
+		Stream:           clientRequestedStream,
+		OpenAIWSMode:     false,
+		TokenAttribution: turnAttribution,
+		Duration:         time.Since(startTime),
+		FirstTokenMs:     firstTokenMs,
 	}, nil
 }
 
@@ -4496,6 +4529,7 @@ type OpenAIRecordUsageInput struct {
 	User              *User
 	Account           *Account
 	Subscription      *UserSubscription
+	ClientRequestID   string
 	UserAgent         string // 请求的 User-Agent
 	IPAddress         string // 请求的客户端 IP 地址
 	ForceCacheBilling bool
@@ -4623,6 +4657,9 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}
 
 	inserted, err := s.usageLogRepo.Create(ctx, usageLog)
+	if inserted {
+		emitOpenAITurnTokenAttributionLog(ctx, input, actualInputTokens)
+	}
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
 		logger.LegacyPrintf("service.openai_gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)

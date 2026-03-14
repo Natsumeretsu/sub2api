@@ -265,6 +265,22 @@ export type OpsRequestKind = 'success' | 'error'
 export type OpsRequestDetailsKind = OpsRequestKind | 'all'
 export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc'
 
+export interface OpsRequestTokenAttribution {
+  bridge_used?: boolean
+  bridge_mode?: string
+  bridge_source?: string
+  replay_input_items?: number
+  replay_input_bytes?: number
+  replay_input_applied?: boolean
+  prompt_cache_key_source?: string
+  prompt_cache_key_used?: boolean
+  compact_request?: boolean
+  compact_outcome?: string
+  upstream_input_tokens?: number
+  billable_input_tokens?: number
+  cache_read_tokens?: number
+}
+
 export interface OpsRequestDetail {
   kind: OpsRequestKind
   created_at: string
@@ -286,6 +302,10 @@ export interface OpsRequestDetail {
   group_id?: number | null
 
   stream?: boolean
+  input_tokens?: number | null
+  cache_read_tokens?: number | null
+  openai_ws_mode?: boolean | null
+  token_attribution?: OpsRequestTokenAttribution | null
 }
 
 export interface OpsRequestDetailsParams {

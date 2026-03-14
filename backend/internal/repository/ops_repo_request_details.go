@@ -102,10 +102,22 @@ WITH combined AS (
     ul.api_key_id AS api_key_id,
     ul.account_id AS account_id,
     ul.group_id AS group_id,
-    ul.stream AS stream
+    ul.stream AS stream,
+    ul.input_tokens AS input_tokens,
+    ul.cache_read_tokens AS cache_read_tokens,
+    ul.openai_ws_mode AS openai_ws_mode,
+    COALESCE(attr.extra, '{}'::jsonb)::text AS attribution_json
   FROM usage_logs ul
   LEFT JOIN groups g ON g.id = ul.group_id
   LEFT JOIN accounts a ON a.id = ul.account_id
+  LEFT JOIN LATERAL (
+    SELECT l.extra
+    FROM ops_system_logs l
+    WHERE COALESCE(l.request_id, '') = COALESCE(ul.request_id, '')
+      AND l.message = 'openai.turn_token_attribution'
+    ORDER BY l.created_at DESC, l.id DESC
+    LIMIT 1
+  ) attr ON TRUE
   WHERE ul.created_at >= $1 AND ul.created_at < $2
 
   UNION ALL
@@ -126,7 +138,11 @@ WITH combined AS (
     o.api_key_id AS api_key_id,
     o.account_id AS account_id,
     o.group_id AS group_id,
-    o.stream AS stream
+    o.stream AS stream,
+    NULL::INT AS input_tokens,
+    NULL::INT AS cache_read_tokens,
+    NULL::BOOLEAN AS openai_ws_mode,
+    '{}'::jsonb::text AS attribution_json
   FROM ops_error_logs o
   LEFT JOIN groups g ON g.id = o.group_id
   LEFT JOIN accounts a ON a.id = o.account_id
@@ -175,7 +191,11 @@ SELECT
   api_key_id,
   account_id,
   group_id,
-  stream
+  stream,
+  input_tokens,
+  cache_read_tokens,
+  openai_ws_mode,
+  attribution_json
 FROM combined
 %s
 %s
@@ -226,7 +246,11 @@ LIMIT $%d OFFSET $%d
 			accountID sql.NullInt64
 			groupID   sql.NullInt64
 
-			stream bool
+			stream          bool
+			inputTokens     sql.NullInt64
+			cacheReadTokens sql.NullInt64
+			openAIWSMode    sql.NullBool
+			attributionJSON sql.NullString
 		)
 
 		if err := rows.Scan(
@@ -246,10 +270,15 @@ LIMIT $%d OFFSET $%d
 			&accountID,
 			&groupID,
 			&stream,
+			&inputTokens,
+			&cacheReadTokens,
+			&openAIWSMode,
+			&attributionJSON,
 		); err != nil {
 			return nil, 0, err
 		}
 
+		attribution := service.DecodeOpenAITurnTokenAttributionJSON(strings.TrimSpace(attributionJSON.String))
 		item := &service.OpsRequestDetail{
 			Kind:      service.OpsRequestKind(kind),
 			CreatedAt: createdAt,
@@ -269,7 +298,17 @@ LIMIT $%d OFFSET $%d
 			AccountID: toInt64Ptr(accountID),
 			GroupID:   toInt64Ptr(groupID),
 
-			Stream: stream,
+			Stream:          stream,
+			InputTokens:     toIntPtr(inputTokens),
+			CacheReadTokens: toIntPtr(cacheReadTokens),
+			OpenAIWSMode: func() *bool {
+				if !openAIWSMode.Valid {
+					return nil
+				}
+				v := openAIWSMode.Bool
+				return &v
+			}(),
+			TokenAttribution: attribution,
 		}
 
 		if item.Platform == "" {

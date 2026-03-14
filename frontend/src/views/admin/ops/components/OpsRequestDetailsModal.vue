@@ -146,6 +146,27 @@ const kindBadgeClass = (kind: string) => {
   if (kind === 'error') return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
   return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
 }
+
+function formatInt(value: number | null | undefined): string {
+  return typeof value === 'number' ? value.toLocaleString() : '-'
+}
+
+function requestTransportLabel(row: OpsRequestDetail): string {
+  if (row.openai_ws_mode === true) return 'WS'
+  if (row.token_attribution?.bridge_used) return 'HTTP bridge'
+  if (row.stream) return 'HTTP stream'
+  return 'HTTP'
+}
+
+function hasAttribution(row: OpsRequestDetail): boolean {
+  return (
+    typeof row.input_tokens === 'number' ||
+    typeof row.cache_read_tokens === 'number' ||
+    row.openai_ws_mode === true ||
+    row.openai_ws_mode === false ||
+    !!row.token_attribution
+  )
+}
 </script>
 
 <template>
@@ -213,6 +234,9 @@ const kindBadgeClass = (kind: string) => {
                   <th class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                     {{ t('admin.ops.requestDetails.table.requestId') }}
                   </th>
+                  <th class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                    {{ t('admin.ops.requestDetails.table.attribution') }}
+                  </th>
                   <th class="px-4 py-3 text-right text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                     {{ t('admin.ops.requestDetails.table.actions') }}
                   </th>
@@ -251,6 +275,36 @@ const kindBadgeClass = (kind: string) => {
                       >
                         {{ t('admin.ops.requestDetails.copy') }}
                       </button>
+                    </div>
+                    <span v-else class="text-xs text-gray-400">-</span>
+                  </td>
+                  <td class="px-4 py-3">
+                    <div v-if="hasAttribution(row)" class="space-y-1 text-[11px] text-gray-600 dark:text-gray-300">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="rounded-full bg-gray-100 px-2 py-1 font-bold text-gray-700 dark:bg-dark-700 dark:text-gray-200">
+                          {{ requestTransportLabel(row) }}
+                        </span>
+                        <span v-if="row.token_attribution?.bridge_used" class="rounded-full bg-blue-100 px-2 py-1 font-bold text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
+                          {{ t('admin.ops.requestDetails.attribution.bridge') }}
+                        </span>
+                        <span v-if="row.token_attribution?.compact_request" class="rounded-full bg-purple-100 px-2 py-1 font-bold text-purple-700 dark:bg-purple-900/30 dark:text-purple-300">
+                          {{ t('admin.ops.requestDetails.attribution.compact') }}
+                        </span>
+                      </div>
+                      <div>
+                        {{ t('admin.ops.requestDetails.attribution.input') }} {{ formatInt(row.input_tokens) }}
+                        <span class="mx-1 text-gray-300 dark:text-gray-600">/</span>
+                        {{ t('admin.ops.requestDetails.attribution.cacheRead') }} {{ formatInt(row.cache_read_tokens ?? row.token_attribution?.cache_read_tokens) }}
+                      </div>
+                      <div v-if="row.token_attribution?.replay_input_bytes || row.token_attribution?.replay_input_items">
+                        {{ t('admin.ops.requestDetails.attribution.replay') }}
+                        {{ formatInt(row.token_attribution?.replay_input_items) }}
+                        <span class="mx-1 text-gray-300 dark:text-gray-600">/</span>
+                        {{ formatInt(row.token_attribution?.replay_input_bytes) }} B
+                      </div>
+                      <div v-if="row.token_attribution?.prompt_cache_key_source" class="text-gray-500 dark:text-gray-400">
+                        {{ t('admin.ops.requestDetails.attribution.promptCacheKey') }} {{ row.token_attribution.prompt_cache_key_source }}
+                      </div>
                     </div>
                     <span v-else class="text-xs text-gray-400">-</span>
                   </td>
