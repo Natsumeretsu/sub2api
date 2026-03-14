@@ -228,6 +228,23 @@
   - `window_upstream_input_tokens`
 - 若最近一次 compact 请求失败，当前则只返回 compact request 本身的 request id / outcome / age，不伪造 delta
 
+当前 `compact_chain` 的语义则更进一步：
+
+- 相关面不是 usage 曲线推断，而是同一 `session_hash` 下所有 successful compact checkpoint 的链式累计视图
+- 只有 request drilldown 命中了明确的 `request_id` 时，才会额外构建 `compact_chain`
+- `compact_chain` 当前会返回：
+  - `segment_count`
+  - `successful_compact_count`
+  - `total_turn_count`
+  - `total_bridge_turn_count`
+  - `total_replay_input_items`
+  - `total_replay_input_bytes`
+  - `total_billable_input_tokens`
+  - `total_cache_read_tokens`
+  - `total_upstream_input_tokens`
+  - `segments[]`，其中每个 segment 对应一条 successful compact request 之后的 post-compact 窗口
+- 这条面回答的是“当前 request 落在怎样的一条 compact session chain 里”，而不是“上一条 compact 的单点差值”
+
 这条面当前还**不能** truthfully 回答：
 
 - compact 之外更长链路上的全局节省率

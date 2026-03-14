@@ -261,6 +261,7 @@ OpenAI 官方文档指向两个核心事实：
 
 - 当前 `ops_system_logs(message=openai.turn_token_attribution)` 会把 `session_hash` 与 compact 请求归因一起持久化
 - `GET /api/v1/admin/ops/requests?request_id=<...>` 现在会按同一 `session_hash` 回查最近一次 compact 请求，并返回 `compact_window`
+- `GET /api/v1/admin/ops/requests?request_id=<...>` 在 request 级 drilldown 上还会继续返回 `compact_chain`，把多个 post-compact 窗口串成同一 session 的链式累计视图
 - `compact_window` 当前已 truthfully 给出：
   - `previous_compact_request_id`
   - `previous_compact_outcome`
@@ -285,8 +286,9 @@ OpenAI 官方文档指向两个核心事实：
 - 当前 turn 的 replay / cache / billable 消耗
 - 当前 turn 与最近一次 compact 请求之间的真实窗口差异
 - 当前 turn 所在的 post-compact 窗口，到目前为止累计了多少 turn / replay / billable / cache / upstream input
+- 同一 session 到当前 request 为止，多个 successful compact 之后的窗口链路总共累计了多少 turn / replay / billable / cache / upstream input
 
-这不是“估算 compact 节省率”，而是“把 compact 前后相邻窗口的真实 request 对账结果直接返回给管理员”。
+这不是“估算 compact 节省率”，而是“把 compact 前后相邻窗口的真实 request 对账结果，连同 session 级链式累计视图，一起直接返回给管理员”。
 
 ## 5. 后续路线图
 
