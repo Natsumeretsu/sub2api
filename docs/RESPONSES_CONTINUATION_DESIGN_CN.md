@@ -176,6 +176,7 @@ OpenAI 官方文档指向两个核心事实：
 - `previous_response_id` 是否能在 HTTP fallback surface 上继续使用，必须单独建模，不能从 `WSv2` continuation capability 推导。当前 fork 会先吃账号显式声明，再吃静态默认，再对自定义 API-key surface 做 runtime probe：OpenAI OAuth passthrough HTTP surface 默认视为不支持，官方 OpenAI API-key surface 默认视为支持，第三方 API-key surface 以 probe 结果为准
 - 一旦请求仍然是 response-bound continuation，而当前选中的 HTTP fallback surface 又明确不支持 `previous_response_id`，handler 现在会直接返回显式 `503 Strong continuation is temporarily unavailable ...`；不会再先在 scheduler 阶段误报 `no available OpenAI accounts`，也不会把 anchored turn 继续发给 upstream 换回 `400 Unsupported parameter: previous_response_id`
 - 当 service 已经捕获到上游结构化 4xx，但尚未来得及写客户端响应时，handler fallback 现在会优先消费 `ops_upstream_status_code / message / detail`：`Unsupported parameter: previous_response_id` 会被提升成显式 `503` 软中断；其余可理解的 upstream 4xx（例如 `previous_response_not_found`）则直接按结构化 4xx 返回给客户端，不再被泛化成 `502 Upstream request failed`
+- OpenAI client boundary 不再把 `text/html` 或 Cloudflare challenge 页当成“可透传的上游语义”。当前 fork 会在 passthrough、普通 `/responses` error writeback、handler failover exhaustion、以及 gateway-side WS bridge 这四条链上统一识别 HTML/challenge 错误页，并改写成结构化 JSON 或 `response.failed` 软中断；用户不会再直接看到整页 HTML `HTTP Status 400` 或 `cdn-cgi/challenge-platform` 页面
 - `client_request_id` 中间件现在优先接受客户端显式传入的 `X-Client-Request-ID` / `Client-Request-ID`，再退回本地生成 UUID，作为后续 turn 级幂等键的最小基础
 - 当客户端显式提供 `client_request_id` 时，turn 级幂等键优先跟随该键，并且不会因为 `previous_response_id` 的对齐、剥离或陈旧漂移而改变；当客户端未显式提供时，网关会退回到 `session_hash + previous_response_id + payload fingerprint` 派生键，避免每次重试都重新生成完全无关的 UUID
 - `/responses` handler 在已有下游输出后，不再对同一 turn 做同账号或跨账号静默重试；如果 streaming 已开始，只补一个明确的终止错误，而不是重新生成第二份回答
@@ -192,7 +193,7 @@ OpenAI 官方文档指向两个核心事实：
 截至当前 fork 基线，更可靠的 live 真相不再写死为固定账号数，而是：
 
 - `Team号池` 与 `Private` 的 OpenAI 候选，必须以 runtime panel 和 `accounts/account_groups` 实时查询为准，不能再沿用旧的 “11 个 OAuth strong” 或 “只有 1 个 RightCode” 这类快照
-- 2026-03-14 的本地 live 数据已经明确：全局存在多枚 OpenAI OAuth 账号，但 `Team号池` / `Private` 当前实际绑定到 scheduler 候选里的，是 `PackyCode`、`RightCode`、`Giot(Free)` 这一类 API-key relay 账号；其中 `Giot(Free)` 当前 `schedulable=false`
+- 2026-03-14 的本地 live 数据已经明确：全局存在多枚 OpenAI OAuth 账号，但 `Team号池` / `Private` 当前实际绑定到 scheduler 候选里的，是 `PackyCode`、`RightCode`、`Giot(Free)` 这一类 API-key relay 账号；其中 `Giot(Free)` 当前 `schedulable=false`，`PackyCode` 与 `RightCode` 当前都仍会进入 scheduler 候选
 - 因此用户看到的 “WS 退到 HTTP fallback / anchored turn 撞 `Unsupported parameter: previous_response_id` / 重复回答 / cache 掉得厉害” 不能再误判成 “OAuth strong 和 API-key degraded 混跑”；更准确地说，是 **当前分组候选本身就主要落在 degraded API-key surface 上**
 
 这条 live truth 的意义不是“账号切换天然就会抖”，而是：
@@ -201,7 +202,7 @@ OpenAI 官方文档指向两个核心事实：
   - `/responses` WS transport capability
   - `/responses` HTTP `previous_response_id` capability
   - `/responses/compact` HTTP `previous_response_id` capability
-- `RightCode` 当前已经通过 live probe 证明：虽然 `RightCode` 仍属于 `degraded-only`，但 `RightCode` 的 `/responses/compact` HTTP surface 支持 `previous_response_id`
+- 当前 runtime smoke 已进一步确认：`RightCode` 与 `PackyCode` 都属于 `degraded-only`，但只有 `RightCode` 的 `/responses/compact` HTTP surface 已通过 runtime probe 被确认支持 `previous_response_id`；`PackyCode` 当前仍被归为 compact-incapable
 - 如果继续把 “有锚点的 compact 请求” 强行按 `WSv2 strong cohort` 去调度，就会在 scheduler 阶段直接把 `RightCode` 筛空，表现成 `503 no available OpenAI accounts`
 - 同样不能把“同一个 OAuth 账号既能走 WSv2 continuation”误当成“同一个 OAuth 账号的 HTTP fallback surface 也支持 `previous_response_id`”。2026-03-14 的 live 日志已经证明：same-account OAuth passthrough 也可能在 HTTP fallback 时直接返回 `Unsupported parameter: previous_response_id`
 - 因此当前设计已经把 capability 再拆成三层：`WS continuation capability` 负责能不能进入 strong cohort；`HTTP previous_response capability` 负责 anchored turn 能不能跨到普通 HTTP fallback；`remote compact previous_response capability` 负责 `/responses/compact` 能不能继续保锚点。前两层都不代表第三层
