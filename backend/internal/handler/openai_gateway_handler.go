@@ -198,10 +198,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 	if anchor.StrongCohort {
 		c.Set(service.OpenAIContinuationStrongCohortCtxKey, true)
-		if service.GetOpenAIClientTransport(c) == service.OpenAIClientTransportHTTP {
-			service.RecordOpenAIWSContinuationWSToHTTPMidSession()
-			reqLog = reqLog.With(zap.Bool("http_mid_session_degrade", true))
-		}
 	}
 	if anchor.FromSessionState && previousResponseID != "" {
 		c.Set(service.OpenAIContinuationPrevRecoveredCtxKey, true)
@@ -209,6 +205,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	clientTransport := service.GetOpenAIClientTransport(c)
 	responseBoundContinuation := openAIHasResponseBoundContinuation(anchor, previousResponseID)
 	c.Set(service.OpenAIContinuationResponseBoundCtxKey, responseBoundContinuation)
+	if openAIShouldRecordWSToHTTPMidSession(anchor, previousResponseID, clientTransport) {
+		service.RecordOpenAIWSContinuationWSToHTTPMidSession()
+		reqLog = reqLog.With(zap.Bool("http_mid_session_degrade", true))
+		reqLog.Info("openai.ws_to_http_mid_session_detected",
+			zap.Bool("has_previous_response_id", strings.TrimSpace(previousResponseID) != ""),
+			zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+			zap.Int64("sticky_account_id", anchor.StickyAccountID),
+		)
+	}
 	requiredTransport := service.ResolveOpenAIResponsesRequiredTransport(
 		anchor,
 		remoteCompact,
@@ -355,13 +360,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		selectedCrossAccount := selection != nil && selection.Account != nil &&
 			openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, selection.Account.ID)
-		if selectedCrossAccount {
-			service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
-			reqLog = reqLog.With(
-				zap.Bool("account_switch_with_cache_drop", true),
-				zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
-			)
-		}
 		reqLog.Debug("openai.account_schedule_decision",
 			zap.String("layer", scheduleDecision.Layer),
 			zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
@@ -415,6 +413,20 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				streamStarted,
 			)
 			return
+		}
+		if openAIShouldRecordAccountSwitchWithCacheDrop(anchor, previousResponseID, selection.Account.ID, scheduleDecision) {
+			service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
+			reqLog = reqLog.With(
+				zap.Bool("account_switch_with_cache_drop", true),
+				zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
+			)
+			reqLog.Warn("openai.account_switch_with_cache_drop_detected",
+				zap.String("layer", scheduleDecision.Layer),
+				zap.Int64("selected_account_id", selection.Account.ID),
+				zap.String("requested_cohort", scheduleDecision.RequestedCohort),
+				zap.String("selected_cohort", scheduleDecision.SelectedCohort),
+				zap.Bool("cache_affinity_used", scheduleDecision.CacheAffinityUsed),
+			)
 		}
 		if selectedCrossAccount {
 			forceCacheBilling = true
@@ -1512,13 +1524,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 
 	account := selection.Account
 	selectedCrossAccount := account != nil && openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, account.ID)
-	if selectedCrossAccount {
-		service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
-		reqLog = reqLog.With(
-			zap.Bool("account_switch_with_cache_drop", true),
-			zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
-		)
-	}
 	if selectedCrossAccount && openAIShouldBlockAnchoredCrossAccountSelection(anchor, previousResponseID, account.ID, scheduleDecision) {
 		service.RecordOpenAIWSContinuationAnchoredCrossAccountSwitchBlocked()
 		reqLog.Warn("openai.websocket_anchored_cross_account_selection_blocked",
@@ -1531,7 +1536,19 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, openAIAnchoredCrossAccountBlockedMessage())
 		return
 	}
-	if selectedCrossAccount {
+	if openAIShouldRecordAccountSwitchWithCacheDrop(anchor, previousResponseID, account.ID, scheduleDecision) {
+		service.RecordOpenAIWSContinuationAccountSwitchWithCacheDrop()
+		reqLog = reqLog.With(
+			zap.Bool("account_switch_with_cache_drop", true),
+			zap.Int64("expected_sticky_account_id", anchor.StickyAccountID),
+		)
+		reqLog.Warn("openai.websocket_account_switch_with_cache_drop_detected",
+			zap.String("layer", scheduleDecision.Layer),
+			zap.Int64("selected_account_id", account.ID),
+			zap.String("requested_cohort", scheduleDecision.RequestedCohort),
+			zap.String("selected_cohort", scheduleDecision.SelectedCohort),
+			zap.Bool("cache_affinity_used", scheduleDecision.CacheAffinityUsed),
+		)
 		wsForceCacheBilling = true
 		reqLog = reqLog.With(zap.Bool("force_cache_billing", true))
 	}
@@ -2046,6 +2063,16 @@ func openAIHasResponseBoundContinuation(anchor service.OpenAIWSContinuationAncho
 	return strings.TrimSpace(previousResponseID) != "" || anchor.FromSessionState
 }
 
+func openAIShouldRecordWSToHTTPMidSession(
+	anchor service.OpenAIWSContinuationAnchor,
+	previousResponseID string,
+	clientTransport service.OpenAIClientTransport,
+) bool {
+	return clientTransport == service.OpenAIClientTransportHTTP &&
+		anchor.StrongCohort &&
+		openAIHasResponseBoundContinuation(anchor, previousResponseID)
+}
+
 func openAIAnchoredCrossAccountBlockedMessage() string {
 	return "Strong continuation anchor belongs to another upstream account; retry later to preserve session continuity and cache affinity"
 }
@@ -2062,6 +2089,18 @@ func openAIShouldForceCacheBillingForSelectedAccount(anchor service.OpenAIWSCont
 		return false
 	}
 	return selectedAccountID != anchor.StickyAccountID
+}
+
+func openAIShouldRecordAccountSwitchWithCacheDrop(
+	anchor service.OpenAIWSContinuationAnchor,
+	previousResponseID string,
+	selectedAccountID int64,
+	scheduleDecision service.OpenAIAccountScheduleDecision,
+) bool {
+	if !openAIShouldForceCacheBillingForSelectedAccount(anchor, previousResponseID, selectedAccountID) {
+		return false
+	}
+	return !openAIShouldBlockAnchoredCrossAccountSelection(anchor, previousResponseID, selectedAccountID, scheduleDecision)
 }
 
 func openAIShouldBlockAnchoredCrossAccountSelection(

@@ -1002,6 +1002,48 @@ func TestOpenAIShouldForceCacheBillingAfterFailover(t *testing.T) {
 	))
 }
 
+func TestOpenAIShouldRecordWSToHTTPMidSession(t *testing.T) {
+	anchor := service.OpenAIWSContinuationAnchor{StrongCohort: true}
+	require.False(t, openAIShouldRecordWSToHTTPMidSession(anchor, "", service.OpenAIClientTransportHTTP))
+	require.True(t, openAIShouldRecordWSToHTTPMidSession(
+		service.OpenAIWSContinuationAnchor{StrongCohort: true, FromSessionState: true},
+		"",
+		service.OpenAIClientTransportHTTP,
+	))
+	require.True(t, openAIShouldRecordWSToHTTPMidSession(
+		service.OpenAIWSContinuationAnchor{StrongCohort: true},
+		"resp_123",
+		service.OpenAIClientTransportHTTP,
+	))
+	require.False(t, openAIShouldRecordWSToHTTPMidSession(
+		service.OpenAIWSContinuationAnchor{StrongCohort: true, FromSessionState: true},
+		"resp_123",
+		service.OpenAIClientTransportWS,
+	))
+}
+
+func TestOpenAIShouldRecordAccountSwitchWithCacheDrop(t *testing.T) {
+	anchor := service.OpenAIWSContinuationAnchor{StickyAccountID: 7, FromSessionState: true}
+	require.False(t, openAIShouldRecordAccountSwitchWithCacheDrop(
+		anchor,
+		"resp_123",
+		7,
+		service.OpenAIAccountScheduleDecision{},
+	))
+	require.False(t, openAIShouldRecordAccountSwitchWithCacheDrop(
+		anchor,
+		"resp_123",
+		8,
+		service.OpenAIAccountScheduleDecision{Layer: "load_balance"},
+	))
+	require.True(t, openAIShouldRecordAccountSwitchWithCacheDrop(
+		anchor,
+		"resp_123",
+		8,
+		service.OpenAIAccountScheduleDecision{Layer: "previous_response_id"},
+	))
+}
+
 func TestOpenAIHandleFailoverRetryBlockedAfterEmit_RecordsStatsWithoutOverwritingBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service.ResetOpenAIWSContinuationStatsForTest()
