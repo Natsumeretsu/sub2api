@@ -125,6 +125,91 @@ func TestBuildOpenAICompactWindowAttribution_IgnoresEmptyWindowRollup(t *testing
 	require.Equal(t, 0, window.WindowTurnCount)
 }
 
+func TestDecodeOpenAICompactChainEventsJSON(t *testing.T) {
+	raw := `[
+		{"request_id":"req-compact-1","created_at_ms":1000,"extra":{"compact_request":true,"compact_outcome":"succeeded","billable_input_tokens":100}},
+		{"request_id":"req-turn-2","created_at_ms":2000,"extra":{"bridge_used":true,"billable_input_tokens":50,"cache_read_tokens":80,"upstream_input_tokens":130}}
+	]`
+
+	events := DecodeOpenAICompactChainEventsJSON(raw)
+
+	require.Len(t, events, 2)
+	require.Equal(t, "req-compact-1", events[0].RequestID)
+	require.True(t, events[0].Attribution.CompactRequest)
+	require.Equal(t, "req-turn-2", events[1].RequestID)
+	require.True(t, events[1].Attribution.BridgeUsed)
+	require.Equal(t, 50, events[1].Attribution.BillableInputTokens)
+}
+
+func TestBuildOpenAICompactChainAttribution(t *testing.T) {
+	currentCreatedAt := time.UnixMilli(5000)
+	events := []OpenAICompactChainEvent{
+		{
+			RequestID:   "req-compact-1",
+			CreatedAtMs: 1000,
+			Attribution: &OpenAITurnTokenAttribution{
+				CompactRequest: true,
+				CompactOutcome: "succeeded",
+			},
+		},
+		{
+			RequestID:   "req-turn-1",
+			CreatedAtMs: 2000,
+			Attribution: &OpenAITurnTokenAttribution{
+				BridgeUsed:          true,
+				ReplayInputItems:    2,
+				ReplayInputBytes:    300,
+				BillableInputTokens: 120,
+				CacheReadTokens:     240,
+				UpstreamInputTokens: 360,
+			},
+		},
+		{
+			RequestID:   "req-compact-2",
+			CreatedAtMs: 3000,
+			Attribution: &OpenAITurnTokenAttribution{
+				CompactRequest: true,
+				CompactOutcome: "succeeded",
+			},
+		},
+		{
+			RequestID:   "req-turn-2",
+			CreatedAtMs: 4200,
+			Attribution: &OpenAITurnTokenAttribution{
+				BridgeUsed:          true,
+				ReplayInputItems:    1,
+				ReplayInputBytes:    120,
+				BillableInputTokens: 80,
+				CacheReadTokens:     160,
+				UpstreamInputTokens: 240,
+			},
+		},
+	}
+
+	chain := BuildOpenAICompactChainAttribution(currentCreatedAt, events)
+
+	require.NotNil(t, chain)
+	require.True(t, chain.TotalsAvailable)
+	require.Equal(t, 2, chain.SegmentCount)
+	require.Equal(t, 2, chain.SuccessfulCompactCount)
+	require.Equal(t, 2, chain.TotalTurnCount)
+	require.Equal(t, 2, chain.TotalBridgeTurnCount)
+	require.Equal(t, 3, chain.TotalReplayInputItems)
+	require.Equal(t, 420, chain.TotalReplayInputBytes)
+	require.Equal(t, 200, chain.TotalBillableInputTokens)
+	require.Equal(t, 400, chain.TotalCacheReadTokens)
+	require.Equal(t, 600, chain.TotalUpstreamInputTokens)
+	require.Len(t, chain.Segments, 2)
+	require.Equal(t, "req-compact-1", chain.Segments[0].CompactRequestID)
+	require.EqualValues(t, 4000, chain.Segments[0].CompactAgeMs)
+	require.Equal(t, 1, chain.Segments[0].WindowTurnCount)
+	require.Equal(t, 120, chain.Segments[0].WindowBillableInput)
+	require.Equal(t, "req-compact-2", chain.Segments[1].CompactRequestID)
+	require.EqualValues(t, 2000, chain.Segments[1].CompactAgeMs)
+	require.Equal(t, 1, chain.Segments[1].WindowTurnCount)
+	require.Equal(t, 80, chain.Segments[1].WindowBillableInput)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_EmitsTurnTokenAttributionLog(t *testing.T) {
 	sink, restore := captureStructuredLog(t)
 	defer restore()

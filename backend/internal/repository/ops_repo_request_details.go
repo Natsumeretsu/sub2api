@@ -83,8 +83,33 @@ func (r *opsRepository) ListRequestDetails(ctx context.Context, filter *service.
 	if len(conditions) > 0 {
 		where = "WHERE " + strings.Join(conditions, " AND ")
 	}
+	includeCompactChain := filter != nil && strings.TrimSpace(filter.RequestID) != ""
+	compactChainSelect := "NULL::TEXT AS compact_chain_json"
+	compactChainJoin := ""
+	if includeCompactChain {
+		compactChainSelect = "COALESCE(compact_chain.chain_json, '[]'::jsonb)::text AS compact_chain_json"
+		compactChainJoin = `
+  LEFT JOIN LATERAL (
+    SELECT jsonb_agg(
+      jsonb_build_object(
+        'request_id', COALESCE(l.request_id, ''),
+        'created_at_ms', (EXTRACT(EPOCH FROM l.created_at) * 1000)::BIGINT,
+        'extra', l.extra
+      )
+      ORDER BY l.created_at ASC, l.id ASC
+    ) AS chain_json
+    FROM ops_system_logs l
+    WHERE l.message = 'openai.turn_token_attribution'
+      AND COALESCE(l.extra->>'session_hash', '') <> ''
+      AND COALESCE(l.extra->>'session_hash', '') = COALESCE(attr.extra->>'session_hash', '')
+      AND (
+        l.created_at <= ul.created_at
+        OR COALESCE(l.request_id, '') = COALESCE(ul.request_id, '')
+      )
+  ) compact_chain ON TRUE`
+	}
 
-	cte := `
+	cte := fmt.Sprintf(`
 WITH combined AS (
   SELECT
     'success'::TEXT AS kind,
@@ -120,7 +145,8 @@ WITH combined AS (
     compact_window_stats.replay_input_bytes AS compact_window_replay_input_bytes,
     compact_window_stats.billable_input_tokens AS compact_window_billable_input_tokens,
     compact_window_stats.cache_read_tokens AS compact_window_cache_read_tokens,
-    compact_window_stats.upstream_input_tokens AS compact_window_upstream_input_tokens
+    compact_window_stats.upstream_input_tokens AS compact_window_upstream_input_tokens,
+    %s
   FROM usage_logs ul
   LEFT JOIN groups g ON g.id = ul.group_id
   LEFT JOIN accounts a ON a.id = ul.account_id
@@ -164,6 +190,7 @@ WITH combined AS (
         OR COALESCE(l.request_id, '') = COALESCE(ul.request_id, '')
       )
   ) compact_window_stats ON TRUE
+%s
   WHERE ul.created_at >= $1 AND ul.created_at < $2
 
   UNION ALL
@@ -198,14 +225,16 @@ WITH combined AS (
     NULL::BIGINT AS compact_window_replay_input_bytes,
     NULL::BIGINT AS compact_window_billable_input_tokens,
     NULL::BIGINT AS compact_window_cache_read_tokens,
-    NULL::BIGINT AS compact_window_upstream_input_tokens
+    NULL::BIGINT AS compact_window_upstream_input_tokens,
+    NULL::TEXT AS compact_chain_json
   FROM ops_error_logs o
   LEFT JOIN groups g ON g.id = o.group_id
   LEFT JOIN accounts a ON a.id = o.account_id
   WHERE o.created_at >= $1 AND o.created_at < $2
     AND COALESCE(o.status_code, 0) >= 400
 )
-`
+)
+`, compactChainSelect, compactChainJoin)
 
 	countQuery := fmt.Sprintf(`%s SELECT COUNT(1) FROM combined %s`, cte, where)
 	var total int64
@@ -261,7 +290,8 @@ SELECT
   compact_window_replay_input_bytes,
   compact_window_billable_input_tokens,
   compact_window_cache_read_tokens,
-  compact_window_upstream_input_tokens
+  compact_window_upstream_input_tokens,
+  compact_chain_json
 FROM combined
 %s
 %s
@@ -327,6 +357,7 @@ LIMIT $%d OFFSET $%d
 			compactWindowBillableInputTokens sql.NullInt64
 			compactWindowCacheReadTokens     sql.NullInt64
 			compactWindowUpstreamInputTokens sql.NullInt64
+			compactChainJSON                 sql.NullString
 		)
 
 		if err := rows.Scan(
@@ -360,6 +391,7 @@ LIMIT $%d OFFSET $%d
 			&compactWindowBillableInputTokens,
 			&compactWindowCacheReadTokens,
 			&compactWindowUpstreamInputTokens,
+			&compactChainJSON,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -420,6 +452,10 @@ LIMIT $%d OFFSET $%d
 					CacheReadTokens:     int(compactWindowCacheReadTokens.Int64),
 					UpstreamInputTokens: int(compactWindowUpstreamInputTokens.Int64),
 				},
+			),
+			CompactChain: service.BuildOpenAICompactChainAttribution(
+				createdAt,
+				service.DecodeOpenAICompactChainEventsJSON(strings.TrimSpace(compactChainJSON.String)),
 			),
 		}
 

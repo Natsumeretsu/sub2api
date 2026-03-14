@@ -3361,7 +3361,11 @@ export default {
           compactBefore: 'Pre-compact request',
           compactDelta: 'Compact delta',
           compactWindowTotals: 'Post-compact totals',
-          compactWindowReplay: 'Post-compact replay'
+          compactWindowReplay: 'Post-compact replay',
+          compactChain: 'Compact chain',
+          compactChainTotals: 'Compact chain totals',
+          compactChainSegment: 'Window segment',
+          compactChainReplay: 'Chain replay'
         }
       },
       alertEvents: {

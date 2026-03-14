@@ -302,6 +302,33 @@ export interface OpsCompactWindowAttribution {
   window_upstream_input_tokens: number
 }
 
+export interface OpsCompactChainSegment {
+  compact_request_id?: string
+  compact_outcome?: string
+  compact_age_ms: number
+  window_turn_count: number
+  window_bridge_turn_count: number
+  window_replay_input_items: number
+  window_replay_input_bytes: number
+  window_billable_input_tokens: number
+  window_cache_read_tokens: number
+  window_upstream_input_tokens: number
+}
+
+export interface OpsCompactChainAttribution {
+  totals_available: boolean
+  segment_count: number
+  successful_compact_count: number
+  total_turn_count: number
+  total_bridge_turn_count: number
+  total_replay_input_items: number
+  total_replay_input_bytes: number
+  total_billable_input_tokens: number
+  total_cache_read_tokens: number
+  total_upstream_input_tokens: number
+  segments?: OpsCompactChainSegment[] | null
+}
+
 export interface OpsRequestDetail {
   kind: OpsRequestKind
   created_at: string
@@ -328,6 +355,7 @@ export interface OpsRequestDetail {
   openai_ws_mode?: boolean | null
   token_attribution?: OpsRequestTokenAttribution | null
   compact_window?: OpsCompactWindowAttribution | null
+  compact_chain?: OpsCompactChainAttribution | null
 }
 
 export interface OpsRequestDetailsParams {

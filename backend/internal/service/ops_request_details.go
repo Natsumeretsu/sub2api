@@ -43,6 +43,7 @@ type OpsRequestDetail struct {
 	OpenAIWSMode     *bool                           `json:"openai_ws_mode,omitempty"`
 	TokenAttribution *OpenAITurnTokenAttribution     `json:"token_attribution,omitempty"`
 	CompactWindow    *OpenAICompactWindowAttribution `json:"compact_window,omitempty"`
+	CompactChain     *OpenAICompactChainAttribution  `json:"compact_chain,omitempty"`
 }
 
 type OpsRequestDetailFilter struct {

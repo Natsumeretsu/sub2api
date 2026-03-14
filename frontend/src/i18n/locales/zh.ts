@@ -3534,7 +3534,11 @@ export default {
           compactBefore: 'Compact 前请求',
           compactDelta: 'Compact 前后差异',
           compactWindowTotals: 'Compact 后累计',
-          compactWindowReplay: 'Compact 后回放'
+          compactWindowReplay: 'Compact 后回放',
+          compactChain: 'Compact 链',
+          compactChainTotals: 'Compact 链累计',
+          compactChainSegment: '窗口明细',
+          compactChainReplay: '链路回放'
         }
       },
       alertEvents: {

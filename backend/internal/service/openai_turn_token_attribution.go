@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -55,6 +56,39 @@ type OpenAICompactWindowRollup struct {
 	BillableInputTokens int
 	CacheReadTokens     int
 	UpstreamInputTokens int
+}
+
+type OpenAICompactChainSegment struct {
+	CompactRequestID       string `json:"compact_request_id,omitempty"`
+	CompactOutcome         string `json:"compact_outcome,omitempty"`
+	CompactAgeMs           int64  `json:"compact_age_ms"`
+	WindowTurnCount        int    `json:"window_turn_count"`
+	WindowBridgeTurnCount  int    `json:"window_bridge_turn_count"`
+	WindowReplayInputItems int    `json:"window_replay_input_items"`
+	WindowReplayInputBytes int    `json:"window_replay_input_bytes"`
+	WindowBillableInput    int    `json:"window_billable_input_tokens"`
+	WindowCacheReadTokens  int    `json:"window_cache_read_tokens"`
+	WindowUpstreamInput    int    `json:"window_upstream_input_tokens"`
+}
+
+type OpenAICompactChainAttribution struct {
+	TotalsAvailable          bool                        `json:"totals_available"`
+	SegmentCount             int                         `json:"segment_count"`
+	SuccessfulCompactCount   int                         `json:"successful_compact_count"`
+	TotalTurnCount           int                         `json:"total_turn_count"`
+	TotalBridgeTurnCount     int                         `json:"total_bridge_turn_count"`
+	TotalReplayInputItems    int                         `json:"total_replay_input_items"`
+	TotalReplayInputBytes    int                         `json:"total_replay_input_bytes"`
+	TotalBillableInputTokens int                         `json:"total_billable_input_tokens"`
+	TotalCacheReadTokens     int                         `json:"total_cache_read_tokens"`
+	TotalUpstreamInputTokens int                         `json:"total_upstream_input_tokens"`
+	Segments                 []OpenAICompactChainSegment `json:"segments,omitempty"`
+}
+
+type OpenAICompactChainEvent struct {
+	RequestID   string
+	CreatedAtMs int64
+	Attribution *OpenAITurnTokenAttribution
 }
 
 func hasOpenAICompactWindowRollupData(input *OpenAICompactWindowRollup) bool {
@@ -176,6 +210,38 @@ func DecodeOpenAITurnTokenAttributionJSON(raw string) *OpenAITurnTokenAttributio
 	return &decoded
 }
 
+func DecodeOpenAICompactChainEventsJSON(raw string) []OpenAICompactChainEvent {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" || raw == "null" {
+		return nil
+	}
+	type wireEvent struct {
+		RequestID   string          `json:"request_id"`
+		CreatedAtMs int64           `json:"created_at_ms"`
+		Extra       json.RawMessage `json:"extra"`
+	}
+	var payload []wireEvent
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+	out := make([]OpenAICompactChainEvent, 0, len(payload))
+	for _, item := range payload {
+		attr := DecodeOpenAITurnTokenAttributionJSON(strings.TrimSpace(string(item.Extra)))
+		if attr == nil {
+			continue
+		}
+		out = append(out, OpenAICompactChainEvent{
+			RequestID:   strings.TrimSpace(item.RequestID),
+			CreatedAtMs: item.CreatedAtMs,
+			Attribution: attr,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func BuildOpenAICompactWindowAttribution(
 	currentInputTokens int,
 	currentCacheReadTokens int,
@@ -231,6 +297,62 @@ func BuildOpenAICompactWindowAttribution(
 	}
 
 	return window
+}
+
+func BuildOpenAICompactChainAttribution(
+	currentCreatedAt time.Time,
+	events []OpenAICompactChainEvent,
+) *OpenAICompactChainAttribution {
+	if len(events) == 0 {
+		return nil
+	}
+	currentMs := currentCreatedAt.UnixMilli()
+	chain := &OpenAICompactChainAttribution{}
+	var currentSegment *OpenAICompactChainSegment
+	for _, event := range events {
+		attr := event.Attribution
+		if attr == nil {
+			continue
+		}
+		if attr.CompactRequest && strings.EqualFold(strings.TrimSpace(attr.CompactOutcome), "succeeded") {
+			segment := OpenAICompactChainSegment{
+				CompactRequestID: strings.TrimSpace(event.RequestID),
+				CompactOutcome:   "succeeded",
+			}
+			if currentMs > 0 && event.CreatedAtMs > 0 && currentMs >= event.CreatedAtMs {
+				segment.CompactAgeMs = currentMs - event.CreatedAtMs
+			}
+			chain.Segments = append(chain.Segments, segment)
+			currentSegment = &chain.Segments[len(chain.Segments)-1]
+			chain.SegmentCount++
+			chain.SuccessfulCompactCount++
+			continue
+		}
+		if currentSegment == nil {
+			continue
+		}
+		currentSegment.WindowTurnCount++
+		if attr.BridgeUsed {
+			currentSegment.WindowBridgeTurnCount++
+			chain.TotalBridgeTurnCount++
+		}
+		currentSegment.WindowReplayInputItems += attr.ReplayInputItems
+		currentSegment.WindowReplayInputBytes += attr.ReplayInputBytes
+		currentSegment.WindowBillableInput += attr.BillableInputTokens
+		currentSegment.WindowCacheReadTokens += attr.CacheReadTokens
+		currentSegment.WindowUpstreamInput += attr.UpstreamInputTokens
+		chain.TotalTurnCount++
+		chain.TotalReplayInputItems += attr.ReplayInputItems
+		chain.TotalReplayInputBytes += attr.ReplayInputBytes
+		chain.TotalBillableInputTokens += attr.BillableInputTokens
+		chain.TotalCacheReadTokens += attr.CacheReadTokens
+		chain.TotalUpstreamInputTokens += attr.UpstreamInputTokens
+	}
+	if chain.SegmentCount == 0 {
+		return nil
+	}
+	chain.TotalsAvailable = true
+	return chain
 }
 
 func resolveOpenAITurnRequestID(ctx context.Context, result *OpenAIForwardResult) string {

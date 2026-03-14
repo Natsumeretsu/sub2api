@@ -165,7 +165,8 @@ function hasAttribution(row: OpsRequestDetail): boolean {
     row.openai_ws_mode === true ||
     row.openai_ws_mode === false ||
     !!row.token_attribution ||
-    !!row.compact_window
+    !!row.compact_window ||
+    !!row.compact_chain
   )
 }
 
@@ -360,6 +361,60 @@ function formatCompactAge(ms: number | null | undefined): string {
                           {{ formatInt(row.compact_window.window_replay_input_items) }}
                           <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
                           {{ formatInt(row.compact_window.window_replay_input_bytes) }} B
+                        </div>
+                      </div>
+                      <div v-if="row.compact_chain" class="rounded-lg border border-orange-200 bg-orange-50/70 px-2 py-1 text-[11px] text-orange-800 dark:border-orange-900/50 dark:bg-orange-900/10 dark:text-orange-200">
+                        <div class="font-semibold">
+                          {{ t('admin.ops.requestDetails.attribution.compactChain') }}
+                          <span class="mx-1">·</span>
+                          {{ formatInt(row.compact_chain.segment_count) }}
+                          <span class="mx-1">/</span>
+                          {{ formatInt(row.compact_chain.successful_compact_count) }}
+                        </div>
+                        <div v-if="row.compact_chain.totals_available">
+                          {{ t('admin.ops.requestDetails.attribution.compactChainTotals') }}
+                          {{ formatInt(row.compact_chain.total_turn_count) }}
+                          <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                          {{ formatInt(row.compact_chain.total_bridge_turn_count) }}
+                          <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                          {{ formatInt(row.compact_chain.total_billable_input_tokens) }}
+                          <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                          {{ formatInt(row.compact_chain.total_cache_read_tokens) }}
+                          <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                          {{ formatInt(row.compact_chain.total_upstream_input_tokens) }}
+                        </div>
+                        <div v-if="row.compact_chain.totals_available" class="text-orange-700/80 dark:text-orange-300/80">
+                          {{ t('admin.ops.requestDetails.attribution.compactChainReplay') }}
+                          {{ formatInt(row.compact_chain.total_replay_input_items) }}
+                          <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                          {{ formatInt(row.compact_chain.total_replay_input_bytes) }} B
+                        </div>
+                        <div v-for="segment in row.compact_chain.segments || []" :key="`${segment.compact_request_id}-${segment.compact_age_ms}`" class="mt-1 rounded border border-orange-200/70 px-2 py-1 dark:border-orange-800/70">
+                          <div class="font-medium">
+                            {{ segment.compact_request_id || '-' }}
+                            <span class="mx-1">·</span>
+                            {{ segment.compact_outcome || '-' }}
+                            <span class="mx-1">·</span>
+                            {{ formatCompactAge(segment.compact_age_ms) }}
+                          </div>
+                          <div>
+                            {{ t('admin.ops.requestDetails.attribution.compactChainSegment') }}
+                            {{ formatInt(segment.window_turn_count) }}
+                            <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                            {{ formatInt(segment.window_bridge_turn_count) }}
+                            <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                            {{ formatInt(segment.window_billable_input_tokens) }}
+                            <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                            {{ formatInt(segment.window_cache_read_tokens) }}
+                            <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                            {{ formatInt(segment.window_upstream_input_tokens) }}
+                          </div>
+                          <div class="text-orange-700/80 dark:text-orange-300/80">
+                            {{ t('admin.ops.requestDetails.attribution.compactChainReplay') }}
+                            {{ formatInt(segment.window_replay_input_items) }}
+                            <span class="mx-1 text-orange-300 dark:text-orange-700">/</span>
+                            {{ formatInt(segment.window_replay_input_bytes) }} B
+                          </div>
                         </div>
                       </div>
                     </div>
