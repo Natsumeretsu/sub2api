@@ -195,6 +195,7 @@ func TestBuildUpstreamRequestOpenAIPassthrough_APIKeyPromptCacheKeySetsSessionHe
 		account,
 		[]byte(`{"model":"gpt-5.4","prompt_cache_key":"pcache-bridge","input":[]}`),
 		"sk-upstream",
+		false,
 	)
 	require.NoError(t, err)
 	require.Equal(t, "pcache-bridge", req.Header.Get("session_id"))

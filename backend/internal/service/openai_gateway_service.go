@@ -1863,6 +1863,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	originalBody := body
 	reqModel, reqStream, promptCacheKey := extractOpenAIRequestMetaFromBody(body)
 	originalModel := reqModel
+	clientRequestedStream := reqStream
 
 	isCodexCLI := openai.IsCodexOfficialClientByHeaders(c.GetHeader("User-Agent"), c.GetHeader("originator")) || (s.cfg != nil && s.cfg.Gateway.ForceCodexCLI)
 	wsDecision := s.resolveOpenAIWSProtocolDecision(ctx, account, reqModel)
@@ -1900,7 +1901,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if passthroughEnabled {
 		// 透传分支只需要轻量提取字段，避免热路径全量 Unmarshal。
 		reasoningEffort := extractOpenAIReasoningEffortFromBody(body, reqModel)
-		return s.forwardOpenAIPassthrough(ctx, c, account, originalBody, reqModel, reasoningEffort, reqStream, startTime)
+		return s.forwardOpenAIPassthrough(ctx, c, account, originalBody, reqModel, reasoningEffort, clientRequestedStream, startTime)
 	}
 
 	reqBody, err := getOpenAIRequestBodyMap(c, body)
@@ -1914,6 +1915,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	if v, ok := reqBody["stream"].(bool); ok {
 		reqStream = v
+		clientRequestedStream = v
 	}
 	if promptCacheKey == "" {
 		if v, ok := reqBody["prompt_cache_key"].(string); ok {
@@ -2156,6 +2158,32 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, fmt.Errorf("serialize request body: %w", marshalErr)
 			}
 		}
+	}
+
+	httpStreamBridge := s.resolveOpenAIHTTPStreamBridgeDecision(
+		ctx,
+		c,
+		account,
+		reqModel,
+		clientRequestedStream,
+		wsDecision.Transport,
+	)
+	if httpStreamBridge.UseBridge {
+		if nextBody, changed, streamErr := setOpenAIRequestStreamValue(body, false); streamErr != nil {
+			return nil, fmt.Errorf("set http bridge upstream stream=false: %w", streamErr)
+		} else if changed {
+			body = nextBody
+		}
+		reqBody["stream"] = false
+		reqStream = false
+		logOpenAIWSModeInfo(
+			"http_stream_bridge_enabled account_id=%d account_name=%s source=%s requested_model=%s previous_response_id_present=%t",
+			account.ID,
+			account.Name,
+			normalizeOpenAIWSLogValue(httpStreamBridge.Source),
+			reqModel,
+			openAIRequestBodyTrimmedString(reqBody, "previous_response_id") != "",
+		)
 	}
 
 	// Get access token
@@ -2421,8 +2449,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// Handle normal response
 	var usage *OpenAIUsage
 	var firstTokenMs *int
-	if reqStream {
-		streamResult, err := s.handleStreamingResponse(ctx, resp, c, account, startTime, originalModel, mappedModel)
+	if clientRequestedStream {
+		var streamResult *openaiStreamingResult
+		if httpStreamBridge.UseBridge {
+			streamResult, err = s.handleStreamingResponseBridge(ctx, resp, c, account, startTime, originalModel, mappedModel, false)
+		} else {
+			streamResult, err = s.handleStreamingResponse(ctx, resp, c, account, startTime, originalModel, mappedModel)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -2455,7 +2488,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		Model:           originalModel,
 		ServiceTier:     serviceTier,
 		ReasoningEffort: reasoningEffort,
-		Stream:          reqStream,
+		Stream:          clientRequestedStream,
 		OpenAIWSMode:    false,
 		Duration:        time.Since(startTime),
 		FirstTokenMs:    firstTokenMs,
@@ -2472,6 +2505,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	reqStream bool,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
+	clientRequestedStream := reqStream
 	if account != nil && account.Type == AccountTypeOAuth {
 		if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(reqModel, body); rejectReason != "" {
 			rejectMsg := "OpenAI codex passthrough requires a non-empty instructions field"
@@ -2504,6 +2538,31 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			body = normalizedBody
 		}
 		reqStream = gjson.GetBytes(body, "stream").Bool()
+		clientRequestedStream = reqStream
+	}
+
+	httpStreamBridge := s.resolveOpenAIHTTPStreamBridgeDecision(
+		ctx,
+		c,
+		account,
+		reqModel,
+		clientRequestedStream,
+		OpenAIUpstreamTransportHTTPSSE,
+	)
+	if httpStreamBridge.UseBridge {
+		if nextBody, changed, streamErr := setOpenAIRequestStreamValue(body, false); streamErr != nil {
+			return nil, fmt.Errorf("set passthrough http bridge upstream stream=false: %w", streamErr)
+		} else if changed {
+			body = nextBody
+		}
+		reqStream = false
+		logger.FromContext(ctx).With(
+			zap.String("component", "service.openai_gateway"),
+			zap.Int64("account_id", account.ID),
+			zap.String("account_name", account.Name),
+			zap.String("bridge_source", strings.TrimSpace(httpStreamBridge.Source)),
+			zap.String("request_model", strings.TrimSpace(reqModel)),
+		).Info("openai.http_stream_bridge_enabled")
 	}
 
 	logger.LegacyPrintf("service.openai_gateway",
@@ -2535,7 +2594,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		return nil, err
 	}
 
-	upstreamReq, err := s.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, body, token)
+	upstreamReq, err := s.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, body, token, reqStream)
 	if err != nil {
 		return nil, err
 	}
@@ -2582,8 +2641,17 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 	var usage *OpenAIUsage
 	var firstTokenMs *int
-	if reqStream {
-		result, err := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime)
+	if clientRequestedStream {
+		var result *openaiStreamingResult
+		if httpStreamBridge.UseBridge {
+			result, err = s.handleStreamingResponseBridge(ctx, resp, c, account, startTime, reqModel, reqModel, true)
+		} else {
+			passthroughResult, streamErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime)
+			if streamErr != nil {
+				return nil, streamErr
+			}
+			result = &openaiStreamingResult{usage: passthroughResult.usage, firstTokenMs: passthroughResult.firstTokenMs}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -2610,7 +2678,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		Model:           reqModel,
 		ServiceTier:     extractOpenAIServiceTierFromBody(body),
 		ReasoningEffort: reasoningEffort,
-		Stream:          reqStream,
+		Stream:          clientRequestedStream,
 		OpenAIWSMode:    false,
 		Duration:        time.Since(startTime),
 		FirstTokenMs:    firstTokenMs,
@@ -2654,6 +2722,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	account *Account,
 	body []byte,
 	token string,
+	isStream bool,
 ) (*http.Request, error) {
 	targetURL := openaiPlatformAPIURL
 	switch account.Type {
@@ -2729,6 +2798,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 				req.Header.Set("session_id", promptCacheKey)
 			}
 		}
+	}
+	if !isOpenAIResponsesCompactPath(c) {
+		setOpenAIUpstreamAcceptHeader(req, isStream)
 	}
 
 	if promptCacheKey != "" {
@@ -3239,6 +3311,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 			req.Header.Set("conversation_id", promptCacheKey)
 			req.Header.Set("session_id", promptCacheKey)
 		}
+	}
+	if !isOpenAIResponsesCompactPath(c) {
+		setOpenAIUpstreamAcceptHeader(req, isStream)
 	}
 
 	// Apply custom User-Agent if configured

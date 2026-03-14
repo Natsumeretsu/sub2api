@@ -3381,7 +3381,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			setOpsUpstreamRequestBody(c, bridgeBody)
 			c.Set("openai_passthrough", true)
-			upstreamReq, buildErr := s.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, bridgeBody, token)
+			upstreamReq, buildErr := s.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, bridgeBody, token, true)
 			if buildErr != nil {
 				return emitBridgeFailure(buildErr.Error())
 			}

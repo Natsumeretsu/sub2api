@@ -290,6 +290,66 @@ func TestOpenAIGatewayService_OAuthPassthrough_CompactUsesJSONAndKeepsNonStreami
 	require.Contains(t, rec.Body.String(), `"id":"cmp_123"`)
 }
 
+func TestOpenAIGatewayService_APIKeyPassthrough_StreamRequestedUsesNonStreamingBridgeForKnownIncapableAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.1.0")
+	c.Request.Header.Set("Accept", "text/event-stream")
+	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+
+	body := []byte(`{"model":"gpt-5.4","stream":true,"store":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"bridge me"}]}]}`)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid-bridge"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_bridge_http","object":"response","model":"gpt-5.4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":41,"output_tokens":7,"total_tokens":48}}`)),
+	}
+	upstream := &httpUpstreamRecorder{resp: resp}
+
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		httpUpstream: upstream,
+	}
+	account := &Account{
+		ID:             16,
+		Name:           "RightCode",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeAPIKey,
+		Concurrency:    1,
+		Credentials:    map[string]any{"api_key": "sk-test", "base_url": "https://right.codes/codex/v1"},
+		Extra:          map[string]any{"openai_passthrough": true},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+	svc.setObservedOpenAIHTTPStreamingCapability(account, false, "probe_stream_missing_done")
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Stream)
+	require.NotNil(t, result.FirstTokenMs)
+	require.Equal(t, 41, result.Usage.InputTokens)
+	require.Equal(t, 7, result.Usage.OutputTokens)
+	require.Equal(t, 0, result.Usage.CacheReadInputTokens)
+
+	require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Accept"))
+	require.Contains(t, rec.Body.String(), `data: {"type":"response.completed","response":{"id":"resp_bridge_http"`)
+	require.Contains(t, rec.Body.String(), `data: [DONE]`)
+}
+
+func TestBuildOpenAISyntheticStreamingTerminalEvent_NullErrorStillCompleted(t *testing.T) {
+	body := []byte(`{"id":"resp_bridge_http","object":"response","model":"gpt-5.4","status":"completed","error":null,"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`)
+
+	require.Equal(t, "response.completed", openAIResponseTerminalEventType(body))
+	payload := buildOpenAISyntheticStreamingTerminalEvent(body)
+	require.Equal(t, "response.completed", gjson.GetBytes(payload, "type").String())
+	require.Equal(t, "completed", gjson.GetBytes(payload, "response.status").String())
+}
+
 func TestOpenAIGatewayService_OAuthPassthrough_CodexMissingInstructionsRejectedBeforeUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logSink, restore := captureStructuredLog(t)

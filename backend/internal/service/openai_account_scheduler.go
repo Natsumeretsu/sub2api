@@ -399,13 +399,14 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 }
 
 type openAIAccountCandidateScore struct {
-	account   *Account
-	loadInfo  *AccountLoadInfo
-	score     float64
-	errorRate float64
-	ttft      float64
-	hasTTFT   bool
-	affinity  float64
+	account          *Account
+	loadInfo         *AccountLoadInfo
+	score            float64
+	errorRate        float64
+	ttft             float64
+	hasTTFT          bool
+	affinity         float64
+	bridgePreference float64
 }
 
 type openAIAccountCandidateHeap []openAIAccountCandidateScore
@@ -621,6 +622,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	streamUnknownLoadReq := make([]AccountWithConcurrency, 0, len(accounts))
 	streamFallbackFiltered := make([]*Account, 0, len(accounts))
 	streamFallbackLoadReq := make([]AccountWithConcurrency, 0, len(accounts))
+	usingStreamFallbackBucket := false
 	requiredCohort := normalizeOpenAIRequiredCohort(req.RequiredCohort, req.RequiredTransport)
 	for i := range accounts {
 		account := &accounts[i]
@@ -677,6 +679,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		case len(filtered) == 0 && len(streamFallbackFiltered) > 0:
 			filtered = streamFallbackFiltered
 			loadReq = streamFallbackLoadReq
+			usingStreamFallbackBucket = true
 		}
 	}
 	if len(filtered) == 0 {
@@ -780,6 +783,10 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			weights.ErrorRate*errorFactor +
 			weights.TTFT*ttftFactor +
 			weights.CacheAffinity*affinityFactor
+		if usingStreamFallbackBucket {
+			item.bridgePreference = s.computeOpenAIHTTPStreamFallbackPreference(item.account)
+			item.score += 2.0 * item.bridgePreference
+		}
 	}
 	if len(candidates) == 0 {
 		return nil, 0, 0, 0, cohortFallback, errors.New("no available OpenAI accounts")
@@ -895,7 +902,35 @@ func (s *defaultOpenAIAccountScheduler) isAccountHTTPStreamingCompatible(
 	if !known {
 		return true
 	}
-	return supported
+	if supported {
+		return true
+	}
+	return canUseOpenAIHTTPNonStreamingBridge(requiredTransport, true)
+}
+
+func (s *defaultOpenAIAccountScheduler) computeOpenAIHTTPStreamFallbackPreference(account *Account) float64 {
+	if s == nil || s.service == nil || account == nil {
+		return 0
+	}
+	supported, known, source := s.service.ResolveOpenAIHTTPStreamingSupport(account)
+	if supported {
+		return 1
+	}
+	if !known {
+		return 0.5
+	}
+	score := 0.2
+	source = strings.TrimSpace(strings.ToLower(source))
+	switch {
+	case strings.HasPrefix(source, "protocol_failure:"):
+		score = 0.0
+	case strings.HasPrefix(source, "probe_"):
+		score = 0.35
+	}
+	if s.service.SupportsOpenAIResponsesCompactForRuntime(account) {
+		score += 0.45
+	}
+	return clamp01(score)
 }
 
 func normalizeOpenAIRequiredCohort(requiredCohort OpenAIContinuationCohort, requiredTransport OpenAIUpstreamTransport) OpenAIContinuationCohort {

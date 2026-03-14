@@ -323,6 +323,58 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedProbesUn
 	}
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedFallbackPrefersBridgeFriendlyCandidate(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.OpenAIStreamRequested, true)
+	groupID := int64(10118)
+	packy := Account{
+		ID:          44001,
+		Name:        "PackyCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	right := Account{
+		ID:          44002,
+		Name:        "RightCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    10,
+	}
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{packy, right}},
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	svc.setObservedOpenAIHTTPStreamingCapability(&packy, false, "protocol_failure:stream_missing_done")
+	svc.setObservedOpenAIHTTPStreamingCapability(&right, false, "probe_stream_missing_done")
+	svc.SetObservedOpenAIResponsesCompactCapability(&right, true, "probe_supported_previous_response_id")
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"",
+		"gpt-5.4",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, right.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedPrefersCapableOverUnknown(t *testing.T) {
 	ctx := context.WithValue(context.Background(), ctxkey.OpenAIStreamRequested, true)
 	groupID := int64(10118)
@@ -366,6 +418,45 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedPrefersC
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
 	require.Equal(t, capable.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedAllowsKnownIncapableCandidateViaBridge(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.OpenAIStreamRequested, true)
+	groupID := int64(10119)
+	fallback := Account{
+		ID:          45001,
+		Name:        "RightCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{fallback}},
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	svc.setObservedOpenAIHTTPStreamingCapability(&fallback, false, "probe_stream_missing_done")
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"",
+		"gpt-5.4",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, fallback.ID, selection.Account.ID)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
