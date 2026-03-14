@@ -1832,39 +1832,10 @@ func resolveOpenAIForwardStructuredUpstreamError(c *gin.Context) (status int, er
 	}
 	upstreamStatus, hasStatus := openAIUpstreamStatusCodeFromContext(c)
 	upstreamMessage, upstreamDetail := openAIUpstreamMessageFromContext(c)
-	if !hasStatus && upstreamMessage == "" && upstreamDetail == "" {
-		return 0, "", "", false
+	if !hasStatus {
+		upstreamStatus = 0
 	}
-	combined := strings.ToLower(strings.TrimSpace(upstreamMessage + "\n" + upstreamDetail))
-	if strings.Contains(combined, "unsupported parameter: previous_response_id") {
-		return http.StatusServiceUnavailable, "api_error", openAIHTTPPreviousResponseUnsupportedMessage(), true
-	}
-	if !hasStatus || upstreamStatus <= 0 {
-		if upstreamMessage != "" {
-			return http.StatusBadGateway, "upstream_error", upstreamMessage, true
-		}
-		return 0, "", "", false
-	}
-	switch upstreamStatus {
-	case http.StatusBadRequest, http.StatusUnprocessableEntity:
-		errType = "invalid_request_error"
-	case http.StatusNotFound:
-		errType = "not_found_error"
-	case http.StatusConflict:
-		errType = "conflict_error"
-	case http.StatusTooManyRequests:
-		errType = "rate_limit_error"
-	default:
-		if upstreamStatus >= 400 && upstreamStatus < 500 {
-			errType = "api_error"
-		} else {
-			return 0, "", "", false
-		}
-	}
-	if upstreamMessage == "" {
-		upstreamMessage = "Upstream request failed"
-	}
-	return upstreamStatus, errType, upstreamMessage, true
+	return service.ResolveOpenAIStructuredUpstreamError(upstreamStatus, upstreamMessage, upstreamDetail)
 }
 
 func openAIUpstreamStatusCodeFromContext(c *gin.Context) (int, bool) {
@@ -2003,7 +1974,7 @@ func openAIAnchoredCrossAccountBlockedMessage() string {
 }
 
 func openAIHTTPPreviousResponseUnsupportedMessage() string {
-	return "Strong continuation is temporarily unavailable on the selected HTTP fallback surface; retry later to preserve session continuity and cache affinity"
+	return service.OpenAIHTTPPreviousResponseUnsupportedMessage()
 }
 
 func openAIShouldForceCacheBillingForSelectedAccount(anchor service.OpenAIWSContinuationAnchor, previousResponseID string, selectedAccountID int64) bool {
