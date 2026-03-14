@@ -77,12 +77,14 @@
 - OAuth 账号默认可进入 `strong cohort`
 - API-key relay 账号默认只进入 `degraded-only`
 - API-key relay 只有显式声明真实 `/responses` WS transport capability 时，才允许进入 `strong cohort`
+- 因此 `apikey_ws_transport_unverified` 现在只表示“当前未验证为 strong”，不再触发请求时乐观探测；user path 会优先按 `degraded-only` 处理，等待显式声明或已有观测把账号提升为 `strong cohort`
 
 当前 live capability 不能再用硬编码账号数表达，而应按 runtime panel 与数据库实时读取：
 
 - `Team号池` / `Private` 当前 scheduler 候选以 API-key relay 为主，不再能从“系统里存在 OAuth 账号”直接推出 “group 内存在 strong cohort”
 - 2026-03-14 的本地 live 数据已验证：`Team号池` 与 `Private` 的 group membership 里实际包含 `PackyCode`、`RightCode`、`Giot(Free)`；其中 `Giot(Free)` 当前 `schedulable=false`
 - 因此 live 的首要问题已经不是“强账号选错”，而是 **当 group 里只剩 degraded HTTP surface 时，gateway 如何避免把 anchored continuation 打碎**
+- 2026-03-14 的后续源码修复又补了一层：当 group 当前没有任何 strong cohort 账号时，WS ingress 不再先试 `ResponsesWebsocketV2` 再回退，而是直接走 bridge 友好的 `Any` transport；这一步的意义不是“追求体验”，而是让 transport 选择与当前 group 的真实 capability 保持一致，避免把一次本可预知的 degraded 路径伪装成“强链路失败后的 fallback”
 - 同一条 live 主线还证明了另一件事：`degraded` 不是单一能力面。`PackyCode` 与 `RightCode` 都属于 `degraded-only`，但 `PackyCode` 的 HTTP `/responses` `stream=true` surface 已被实锤为会在未收到 `[DONE]` 时提前结束，而 `RightCode` 尚未观测到同类问题。因此 scheduler 不能只看 `strong/degraded cohort`，还必须继续细分 `HTTP streaming capable / incapable / unknown`。当前 fork 已把这类观测写入共享 gateway cache，因此一旦某个账号被观测为 `http_streaming_incapable`，同一 Redis 观测窗口内的新进程和重启后的实例都会优先避开该账号，而不是每次重启都重新踩一次
 
 这一步的目的，是阻断“把不支持 `/responses` WS transport 的 relay 账号误当成 strong account”这一类根因，避免账号切换时把强 continuation 会话切碎、把缓存亲和打掉、再把用户体验问题伪装成普通 fallback。
