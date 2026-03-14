@@ -1811,6 +1811,19 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	}
 
 	if len(responseBody) > 0 {
+		if status, errType, errMsg, ok := service.ResolveOpenAIBodyAwareUpstreamError(
+			statusCode,
+			failoverErr.ResponseHeaders,
+			responseBody,
+			strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)),
+			strings.TrimSpace(string(responseBody)),
+		); ok {
+			h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
+			return
+		}
+	}
+
+	if len(responseBody) > 0 {
 		if msg := strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)); msg != "" {
 			h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", msg, streamStarted)
 			return

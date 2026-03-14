@@ -84,6 +84,53 @@ func (r stubOpenAIAccountRepo) ListSchedulableUngroupedByPlatform(ctx context.Co
 	return r.ListSchedulableByPlatform(ctx, platform)
 }
 
+func TestHandleErrorResponsePassthrough_CloudflareHTMLMappedToStructuredError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 16, Name: "RightCode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header: http.Header{
+			"Content-Type": []string{"text/html; charset=utf-8"},
+			"Cf-Ray":       []string{"9dc2bc984a926ad4"},
+		},
+		Body: io.NopCloser(strings.NewReader(`<!doctype html><html><head><title>HTTP Status 400 – Bad Request</title></head><body><script>window.__CF$cv$params={};</script><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>`)),
+	}
+
+	err := svc.handleErrorResponsePassthrough(context.Background(), resp, c, account, []byte(`{"model":"gpt-5.4","input":[]}`))
+	require.Error(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.NotContains(t, w.Body.String(), "<!doctype html>")
+	require.Contains(t, w.Body.String(), `"type":"api_error"`)
+	require.Contains(t, w.Body.String(), "Cloudflare challenge page")
+	require.Contains(t, w.Body.String(), "cf-ray: 9dc2bc984a926ad4")
+}
+
+func TestHandleErrorResponsePassthrough_GenericHTMLMappedToStructuredError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 14, Name: "PackyCode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader(`<!doctype html><html lang="en"><head><title>HTTP Status 400 – Bad Request</title></head><body>bad request</body></html>`)),
+	}
+
+	err := svc.handleErrorResponsePassthrough(context.Background(), resp, c, account, []byte(`{"model":"gpt-5.4","input":[]}`))
+	require.Error(t, err)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.NotContains(t, w.Body.String(), "<!doctype html>")
+	require.Contains(t, w.Body.String(), "unexpected HTML error page")
+}
+
 type stubConcurrencyCache struct {
 	ConcurrencyCache
 	loadBatchErr    error

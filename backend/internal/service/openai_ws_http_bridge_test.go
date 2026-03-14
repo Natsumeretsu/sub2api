@@ -97,7 +97,45 @@ func TestRelayOpenAIWSHTTPBridgeStream_HTTPErrorBecomesResponseFailedEvent(t *te
 	require.NotNil(t, result)
 	require.Len(t, writes, 1)
 	require.Equal(t, "response.failed", gjson.GetBytes(writes[0], "type").String())
-	require.Contains(t, gjson.GetBytes(writes[0], "error.message").String(), "Unsupported parameter")
+	require.Equal(t, OpenAIHTTPPreviousResponseUnsupportedMessage(), gjson.GetBytes(writes[0], "error.message").String())
+}
+
+func TestRelayOpenAIWSHTTPBridgeStream_HTMLChallengeErrorBecomesStructuredFailedEvent(t *testing.T) {
+	svc := &OpenAIGatewayService{cfg: newOpenAIWSV2TestConfig()}
+	account := &Account{
+		ID:       16,
+		Name:     "RightCode",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header: http.Header{
+			"Content-Type": []string{"text/html; charset=utf-8"},
+			"cf-ray":       []string{"9dc2bc984a926ad4"},
+		},
+		Body: io.NopCloser(strings.NewReader(`<!doctype html><html><head><title>HTTP Status 400 – Bad Request</title></head><body><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>`)),
+	}
+	writes := make([][]byte, 0, 2)
+
+	result, err := svc.relayOpenAIWSHTTPBridgeStream(
+		context.Background(),
+		resp,
+		account,
+		[]byte(`{"model":"gpt-5.4","stream":true}`),
+		"gpt-5.4",
+		time.Now(),
+		func(message []byte) error {
+			writes = append(writes, append([]byte(nil), message...))
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, writes, 1)
+	require.Equal(t, "response.failed", gjson.GetBytes(writes[0], "type").String())
+	require.NotContains(t, string(writes[0]), "<!doctype html>")
+	require.Contains(t, gjson.GetBytes(writes[0], "error.message").String(), "Cloudflare challenge page")
 }
 
 func TestExtractOpenAIWSReplayInputFromCompletedEvent_MessageAndPromptCacheKey(t *testing.T) {

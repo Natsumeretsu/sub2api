@@ -238,6 +238,33 @@ func TestOpenAIHandleFailoverExhausted_PrefersStructuredUpstreamMessage(t *testi
 	assert.Equal(t, "Upstream compact stream disconnected before completion", errorObj["message"])
 }
 
+func TestOpenAIHandleFailoverExhausted_HTMLBodyMapsStructuredError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses", nil)
+
+	h := &OpenAIGatewayHandler{}
+	h.handleFailoverExhausted(c, &service.UpstreamFailoverError{
+		StatusCode: http.StatusBadRequest,
+		ResponseHeaders: http.Header{
+			"Content-Type": []string{"text/html; charset=utf-8"},
+			"cf-ray":       []string{"9dc2bc984a926ad4"},
+		},
+		ResponseBody: []byte(`<!doctype html><html><head><title>HTTP Status 400 – Bad Request</title></head><body><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>`),
+	}, false)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	var parsed map[string]any
+	err := json.Unmarshal(w.Body.Bytes(), &parsed)
+	require.NoError(t, err)
+	errorObj, ok := parsed["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "api_error", errorObj["type"])
+	assert.NotContains(t, w.Body.String(), "<!doctype html>")
+	assert.Contains(t, errorObj["message"], "Cloudflare challenge page")
+}
+
 func TestShouldLogOpenAIForwardFailureAsWarn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

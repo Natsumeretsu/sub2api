@@ -323,6 +323,22 @@ func (s *OpenAIGatewayService) relayOpenAIWSHTTPBridgeStream(
 
 	if resp.StatusCode >= 400 {
 		body, _ := readUpstreamResponseBodyLimited(resp.Body, 2<<20)
+		if status, errType, errMsg, matched := ResolveOpenAIBodyAwareUpstreamError(
+			resp.StatusCode,
+			resp.Header,
+			body,
+			strings.TrimSpace(extractUpstreamErrorMessage(body)),
+			strings.TrimSpace(string(body)),
+		); matched {
+			message := strings.TrimSpace(errMsg)
+			if message == "" {
+				message = fmt.Sprintf("Upstream bridge request failed with status %d", status)
+			}
+			if errType != "" {
+				message = sanitizeUpstreamErrorMessage(message)
+			}
+			return emitFailure(message)
+		}
 		message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(body)))
 		if message == "" {
 			message = fmt.Sprintf("Upstream bridge request failed with status %d", resp.StatusCode)

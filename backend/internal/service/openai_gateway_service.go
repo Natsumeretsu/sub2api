@@ -2758,6 +2758,28 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 		UpstreamResponseBody: upstreamDetail,
 	})
 
+	if status, errType, errMsg, matched := ResolveOpenAIHTMLUpstreamError(
+		resp.StatusCode,
+		resp.Header,
+		body,
+		upstreamMsg,
+		upstreamDetail,
+	); matched {
+		c.JSON(status, gin.H{
+			"error": gin.H{
+				"type":    errType,
+				"message": errMsg,
+			},
+		})
+		if upstreamMsg == "" {
+			upstreamMsg = errMsg
+		}
+		if upstreamMsg == "" {
+			return fmt.Errorf("upstream error: %d (html upstream error)", resp.StatusCode)
+		}
+		return fmt.Errorf("upstream error: %d (html upstream error) message=%s", resp.StatusCode, upstreamMsg)
+	}
+
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
@@ -3169,7 +3191,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 	}
 
-	if status, errType, errMsg, matched := ResolveOpenAIStructuredUpstreamError(resp.StatusCode, upstreamMsg, upstreamDetail); matched {
+	if status, errType, errMsg, matched := ResolveOpenAIBodyAwareUpstreamError(resp.StatusCode, resp.Header, body, upstreamMsg, upstreamDetail); matched {
 		c.JSON(status, gin.H{
 			"error": gin.H{
 				"type":    errType,
