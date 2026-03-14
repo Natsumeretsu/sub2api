@@ -2875,6 +2875,25 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	account *Account,
 	startTime time.Time,
 ) (*openaiStreamingResultPassthrough, error) {
+	maxBytes := resolveUpstreamResponseReadLimit(s.cfg)
+	upstreamReader := bufio.NewReader(resp.Body)
+	if preview, err := upstreamReader.Peek(2048); err == nil || len(preview) > 0 {
+		if status, errType, errMsg, matched := ResolveOpenAIHTMLUpstreamError(
+			resp.StatusCode,
+			resp.Header,
+			preview,
+			"",
+			truncateString(string(preview), 2048),
+		); matched {
+			body, readErr := readUpstreamResponseBodyLimited(upstreamReader, maxBytes)
+			if readErr != nil {
+				body = append([]byte(nil), preview...)
+			}
+			s.markOpenAIPassthroughProtocolFailure(ctx, account, "stream_html_or_challenge_success")
+			return nil, buildOpenAIStructuredProtocolFailover(resp, status, errType, errMsg, body, false)
+		}
+	}
+
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 
 	// SSE headers
@@ -2898,7 +2917,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	sawDone := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(upstreamReader)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
@@ -2964,6 +2983,15 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			zap.Int64("account_id", account.ID),
 			zap.String("upstream_request_id", upstreamRequestID),
 		).Info("OpenAI passthrough 上游流在未收到 [DONE] 时结束，疑似断流")
+		s.markOpenAIPassthroughProtocolFailure(ctx, account, "stream_missing_done")
+		return &openaiStreamingResultPassthrough{usage: usage, firstTokenMs: firstTokenMs}, buildOpenAIStructuredProtocolFailover(
+			resp,
+			http.StatusBadGateway,
+			"upstream_error",
+			"Upstream streaming response disconnected before completion",
+			nil,
+			false,
+		)
 	}
 
 	return &openaiStreamingResultPassthrough{usage: usage, firstTokenMs: firstTokenMs}, nil
@@ -2987,6 +3015,16 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 			})
 		}
 		return nil, err
+	}
+
+	if status, errType, errMsg, matched := ResolveOpenAIHTMLUpstreamError(
+		resp.StatusCode,
+		resp.Header,
+		body,
+		"",
+		truncateString(string(body), 2048),
+	); matched {
+		return nil, buildOpenAIStructuredProtocolFailover(resp, status, errType, errMsg, body, false)
 	}
 
 	if shouldValidateOpenAINonStreamingProtocol(c) {
@@ -4007,6 +4045,66 @@ func buildOpenAINonStreamingProtocolFailover(resp *http.Response, message string
 		ResponseHeaders:        headers,
 		RetryableOnSameAccount: true,
 	}
+}
+
+func buildOpenAIStructuredProtocolFailover(
+	resp *http.Response,
+	status int,
+	errType string,
+	message string,
+	body []byte,
+	retryableSameAccount bool,
+) error {
+	message = sanitizeUpstreamErrorMessage(strings.TrimSpace(message))
+	if message == "" {
+		message = "Upstream returned an invalid response"
+	}
+	if status <= 0 {
+		status = http.StatusBadGateway
+	}
+	if errType == "" {
+		errType = "upstream_error"
+	}
+	headers := http.Header{}
+	if resp != nil && resp.Header != nil {
+		headers = resp.Header.Clone()
+	}
+	if len(body) == 0 {
+		body = []byte(`{"error":{"type":` + strconv.Quote(errType) + `,"message":` + strconv.Quote(message) + `}}`)
+	}
+	return &UpstreamFailoverError{
+		StatusCode:             status,
+		ResponseBody:           body,
+		ResponseHeaders:        headers,
+		RetryableOnSameAccount: retryableSameAccount,
+	}
+}
+
+func (s *OpenAIGatewayService) markOpenAIPassthroughProtocolFailure(ctx context.Context, account *Account, reason string) {
+	if s == nil || s.accountRepo == nil || account == nil {
+		return
+	}
+	cooldown := s.openAIWSFallbackCooldown()
+	if cooldown <= 0 {
+		return
+	}
+	until := time.Now().Add(cooldown)
+	if err := s.accountRepo.SetOverloaded(ctx, account.ID, until); err != nil {
+		logger.FromContext(ctx).With(
+			zap.String("component", "service.openai_gateway"),
+			zap.Int64("account_id", account.ID),
+			zap.String("reason", strings.TrimSpace(reason)),
+			zap.Error(err),
+		).Warn("openai.passthrough_protocol_cooldown_set_failed")
+		return
+	}
+	logger.FromContext(ctx).With(
+		zap.String("component", "service.openai_gateway"),
+		zap.Int64("account_id", account.ID),
+		zap.String("reason", strings.TrimSpace(reason)),
+		zap.Duration("cooldown", cooldown),
+		zap.Time("until", until),
+	).Warn("openai.passthrough_protocol_cooldown_applied")
 }
 
 func extractOpenAISSETerminalEvent(body string) (string, []byte, bool) {

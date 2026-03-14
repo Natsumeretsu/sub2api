@@ -131,6 +131,86 @@ func TestHandleErrorResponsePassthrough_GenericHTMLMappedToStructuredError(t *te
 	require.Contains(t, w.Body.String(), "unexpected HTML error page")
 }
 
+func TestHandleNonStreamingResponsePassthrough_HTMLSuccessReturnsProtocolFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/html; charset=utf-8"},
+			"Cf-Ray":       []string{"9dc2bc984a926ad4"},
+		},
+		Body: io.NopCloser(strings.NewReader(`<!doctype html><html><head><title>HTTP Status 400 – Bad Request</title></head><body><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>`)),
+	}
+
+	usage, err := svc.handleNonStreamingResponsePassthrough(context.Background(), resp, c)
+	require.Nil(t, usage)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusServiceUnavailable, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "<!doctype html>")
+	require.Empty(t, rec.Body.String())
+}
+
+func TestHandleStreamingResponsePassthrough_HTMLSuccessReturnsProtocolFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 14, Name: "PackyCode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/html; charset=utf-8"},
+			"Cf-Ray":       []string{"9dc2bc984a926ad4"},
+		},
+		Body: io.NopCloser(strings.NewReader(`<!doctype html><html><head><title>HTTP Status 400 – Bad Request</title></head><body><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>`)),
+	}
+
+	result, err := svc.handleStreamingResponsePassthrough(context.Background(), resp, c, account, time.Now())
+	require.Nil(t, result)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusServiceUnavailable, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "<!doctype html>")
+	require.Empty(t, rec.Body.String())
+}
+
+func TestHandleStreamingResponsePassthrough_MissingDoneReturnsProtocolFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 14, Name: "PackyCode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.created","response":{"id":"resp_1"}}`,
+			`data: {"type":"response.output_text.delta","delta":"hello"}`,
+		}, "\n"))),
+	}
+
+	result, err := svc.handleStreamingResponsePassthrough(context.Background(), resp, c, account, time.Now())
+	require.NotNil(t, result)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.Contains(t, string(failoverErr.ResponseBody), "Upstream streaming response disconnected before completion")
+	require.Contains(t, rec.Body.String(), `response.output_text.delta`)
+}
+
 type stubConcurrencyCache struct {
 	ConcurrencyCache
 	loadBatchErr    error
