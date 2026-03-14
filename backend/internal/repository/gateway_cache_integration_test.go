@@ -34,6 +34,15 @@ type gatewayCacheOpenAIWSSessionTurnStateTTLCapability interface {
 	GetOpenAIWSSessionTurnStateWithTTL(ctx context.Context, groupID int64, sessionHash string) (string, time.Duration, error)
 }
 
+type gatewayCacheOpenAIHTTPStreamingCapability interface {
+	GetOpenAIHTTPStreamingCapability(ctx context.Context, accountID int64) (bool, string, error)
+	SetOpenAIHTTPStreamingCapability(ctx context.Context, accountID int64, supported bool, source string, ttl time.Duration) error
+}
+
+type gatewayCacheOpenAIHTTPStreamingTTLCapability interface {
+	GetOpenAIHTTPStreamingCapabilityWithTTL(ctx context.Context, accountID int64) (bool, string, time.Duration, error)
+}
+
 type GatewayCacheSuite struct {
 	IntegrationRedisSuite
 	cache service.GatewayCache
@@ -219,6 +228,32 @@ func (s *GatewayCacheSuite) TestOpenAIWSSessionTurnStateGetWithTTL() {
 	require.NoError(s.T(), err)
 	require.Equal(s.T(), turnState, gotTurnState)
 	s.AssertTTLWithin(ttl, 1*time.Second, sessionTTL)
+}
+
+func (s *GatewayCacheSuite) TestOpenAIHTTPStreamingCapabilityLifecycle() {
+	cache, ok := s.cache.(gatewayCacheOpenAIHTTPStreamingCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai http streaming capability")
+	ttlCache, ok := s.cache.(gatewayCacheOpenAIHTTPStreamingTTLCapability)
+	require.True(s.T(), ok, "gateway cache should expose optional openai http streaming ttl capability")
+
+	accountID := int64(16)
+	ttlWindow := 1 * time.Minute
+
+	_, _, err := cache.GetOpenAIHTTPStreamingCapability(s.ctx, accountID)
+	require.True(s.T(), errors.Is(err, redis.Nil), "expected redis.Nil for missing openai http streaming capability")
+
+	require.NoError(s.T(), cache.SetOpenAIHTTPStreamingCapability(s.ctx, accountID, false, "protocol_failure:stream_missing_done", ttlWindow))
+
+	supported, source, err := cache.GetOpenAIHTTPStreamingCapability(s.ctx, accountID)
+	require.NoError(s.T(), err)
+	require.False(s.T(), supported)
+	require.Equal(s.T(), "protocol_failure:stream_missing_done", source)
+
+	supported, source, ttl, err := ttlCache.GetOpenAIHTTPStreamingCapabilityWithTTL(s.ctx, accountID)
+	require.NoError(s.T(), err)
+	require.False(s.T(), supported)
+	require.Equal(s.T(), "protocol_failure:stream_missing_done", source)
+	s.AssertTTLWithin(ttl, 1*time.Second, ttlWindow)
 }
 
 func TestGatewayCacheSuite(t *testing.T) {

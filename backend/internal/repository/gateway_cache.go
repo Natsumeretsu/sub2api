@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,12 @@ import (
 const stickySessionPrefix = "sticky_session:"
 const openAIWSSessionLastResponsePrefix = "openai_ws:session_last_response:"
 const openAIWSSessionTurnStatePrefix = "openai_ws:session_turn_state:"
+const openAIHTTPStreamingCapabilityPrefix = "openai_http:streaming_capability:"
+
+type openAIHTTPStreamingCapabilityRecord struct {
+	Supported bool   `json:"supported"`
+	Source    string `json:"source,omitempty"`
+}
 
 type gatewayCache struct {
 	rdb *redis.Client
@@ -34,6 +41,10 @@ func buildOpenAIWSSessionLastResponseKey(groupID int64, sessionHash string) stri
 
 func buildOpenAIWSSessionTurnStateKey(groupID int64, sessionHash string) string {
 	return fmt.Sprintf("%s%d:%s", openAIWSSessionTurnStatePrefix, groupID, strings.TrimSpace(sessionHash))
+}
+
+func buildOpenAIHTTPStreamingCapabilityKey(accountID int64) string {
+	return fmt.Sprintf("%s%d", openAIHTTPStreamingCapabilityPrefix, accountID)
 }
 
 func (c *gatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -101,6 +112,36 @@ func (c *gatewayCache) SetOpenAIWSSessionTurnState(ctx context.Context, groupID 
 func (c *gatewayCache) DeleteOpenAIWSSessionTurnState(ctx context.Context, groupID int64, sessionHash string) error {
 	key := buildOpenAIWSSessionTurnStateKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *gatewayCache) GetOpenAIHTTPStreamingCapability(ctx context.Context, accountID int64) (bool, string, error) {
+	supported, source, _, err := c.GetOpenAIHTTPStreamingCapabilityWithTTL(ctx, accountID)
+	return supported, source, err
+}
+
+func (c *gatewayCache) GetOpenAIHTTPStreamingCapabilityWithTTL(ctx context.Context, accountID int64) (bool, string, time.Duration, error) {
+	key := buildOpenAIHTTPStreamingCapabilityKey(accountID)
+	value, ttl, err := c.getStringWithTTL(ctx, key)
+	if err != nil {
+		return false, "", 0, err
+	}
+	var record openAIHTTPStreamingCapabilityRecord
+	if err := json.Unmarshal([]byte(value), &record); err != nil {
+		return false, "", 0, err
+	}
+	return record.Supported, strings.TrimSpace(record.Source), ttl, nil
+}
+
+func (c *gatewayCache) SetOpenAIHTTPStreamingCapability(ctx context.Context, accountID int64, supported bool, source string, ttl time.Duration) error {
+	key := buildOpenAIHTTPStreamingCapabilityKey(accountID)
+	payload, err := json.Marshal(openAIHTTPStreamingCapabilityRecord{
+		Supported: supported,
+		Source:    strings.TrimSpace(source),
+	})
+	if err != nil {
+		return err
+	}
+	return c.rdb.Set(ctx, key, payload, ttl).Err()
 }
 
 func (c *gatewayCache) getStringWithTTL(ctx context.Context, key string) (string, time.Duration, error) {

@@ -233,7 +233,8 @@ func TestHandleStreamingResponsePassthrough_HealthyStreamCommitsBufferedOutput(t
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 
-	svc := &OpenAIGatewayService{}
+	cache := &stubGatewayCache{}
+	svc := &OpenAIGatewayService{cache: cache}
 	account := &Account{ID: 16, Name: "RightCode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -252,6 +253,14 @@ func TestHandleStreamingResponsePassthrough_HealthyStreamCommitsBufferedOutput(t
 	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), `response.output_text.delta`)
 	require.Contains(t, rec.Body.String(), `[DONE]`)
+	supported, known, source := svc.ResolveOpenAIHTTPStreamingSupport(account)
+	require.True(t, supported)
+	require.True(t, known)
+	require.Equal(t, "runtime_saw_done", source)
+	binding, ok := cache.httpStreamingBindings[account.ID]
+	require.True(t, ok)
+	require.True(t, binding.supported)
+	require.Equal(t, "runtime_saw_done", binding.source)
 }
 
 func TestMarkOpenAIPassthroughProtocolFailure_UsesDetachedContext(t *testing.T) {
@@ -451,7 +460,14 @@ type stubGatewayCache struct {
 	sessionBindings             map[string]int64
 	sessionTurnStateBindings    map[string]string
 	sessionLastResponseBindings map[string]string
+	httpStreamingBindings       map[int64]stubGatewayHTTPStreamingBinding
 	deletedSessions             map[string]int
+}
+
+type stubGatewayHTTPStreamingBinding struct {
+	supported bool
+	source    string
+	expiresAt time.Time
 }
 
 func (c *stubGatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -528,6 +544,42 @@ func (c *stubGatewayCache) DeleteOpenAIWSSessionLastResponse(ctx context.Context
 		return nil
 	}
 	delete(c.sessionLastResponseBindings, sessionHash)
+	return nil
+}
+
+func (c *stubGatewayCache) GetOpenAIHTTPStreamingCapability(ctx context.Context, accountID int64) (bool, string, error) {
+	supported, source, _, err := c.GetOpenAIHTTPStreamingCapabilityWithTTL(ctx, accountID)
+	return supported, source, err
+}
+
+func (c *stubGatewayCache) GetOpenAIHTTPStreamingCapabilityWithTTL(ctx context.Context, accountID int64) (bool, string, time.Duration, error) {
+	if c.httpStreamingBindings == nil {
+		return false, "", 0, errors.New("not found")
+	}
+	binding, ok := c.httpStreamingBindings[accountID]
+	if !ok {
+		return false, "", 0, errors.New("not found")
+	}
+	ttl := time.Until(binding.expiresAt)
+	if ttl <= 0 {
+		delete(c.httpStreamingBindings, accountID)
+		return false, "", 0, errors.New("not found")
+	}
+	return binding.supported, binding.source, ttl, nil
+}
+
+func (c *stubGatewayCache) SetOpenAIHTTPStreamingCapability(ctx context.Context, accountID int64, supported bool, source string, ttl time.Duration) error {
+	if c.httpStreamingBindings == nil {
+		c.httpStreamingBindings = make(map[int64]stubGatewayHTTPStreamingBinding)
+	}
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	c.httpStreamingBindings[accountID] = stubGatewayHTTPStreamingBinding{
+		supported: supported,
+		source:    source,
+		expiresAt: time.Now().Add(ttl),
+	}
 	return nil
 }
 

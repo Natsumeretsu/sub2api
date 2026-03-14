@@ -3049,6 +3049,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			false,
 		)
 	}
+	if account.IsOpenAIApiKey() && sawDone {
+		s.setObservedOpenAIHTTPStreamingCapability(account, true, "runtime_saw_done")
+	}
 
 	return &openaiStreamingResultPassthrough{usage: usage, firstTokenMs: firstTokenMs}, nil
 }

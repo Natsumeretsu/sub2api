@@ -189,6 +189,64 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedAvoidsOb
 	}
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedAvoidsCachedHTTPStreamingUnsupportedAccount(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.OpenAIStreamRequested, true)
+	groupID := int64(10116)
+	risky := Account{
+		ID:          42001,
+		Name:        "PackyCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	stable := Account{
+		ID:          42002,
+		Name:        "RightCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    10,
+	}
+	sharedCache := &stubGatewayCache{}
+	svc1 := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{risky, stable}},
+		cache:              sharedCache,
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	svc1.setObservedOpenAIHTTPStreamingCapability(&risky, false, "protocol_failure:stream_missing_done")
+
+	svc2 := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{risky, stable}},
+		cache:              sharedCache,
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	selection, decision, err := svc2.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"",
+		"gpt-5.4",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, stable.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionSticky(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(10)

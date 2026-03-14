@@ -36,31 +36,41 @@ type OpenAIWSContinuationRuntimeSnapshot struct {
 }
 
 type OpenAIWSContinuationCapabilitySnapshot struct {
-	GlobalTotalOpenAIAccounts      int64                                   `json:"global_total_openai_accounts"`
-	GlobalCompactCapableAccounts   int64                                   `json:"global_compact_capable_accounts"`
-	GlobalStrongCohortAccounts     int64                                   `json:"global_strong_cohort_accounts"`
-	GlobalDegradedOnlyAccounts     int64                                   `json:"global_degraded_only_accounts"`
-	GlobalCompactIncapableAccounts int64                                   `json:"global_compact_incapable_accounts"`
-	HasAnyCompactCapableAccount    bool                                    `json:"has_any_compact_capable_account"`
-	HasAnyStrongCohortAccount      bool                                    `json:"has_any_strong_cohort_account"`
-	HasAnyDegradedOnlyAccount      bool                                    `json:"has_any_degraded_only_account"`
-	Groups                         []OpenAIWSContinuationGroupAvailability `json:"groups"`
+	GlobalTotalOpenAIAccounts            int64                                   `json:"global_total_openai_accounts"`
+	GlobalCompactCapableAccounts         int64                                   `json:"global_compact_capable_accounts"`
+	GlobalStrongCohortAccounts           int64                                   `json:"global_strong_cohort_accounts"`
+	GlobalDegradedOnlyAccounts           int64                                   `json:"global_degraded_only_accounts"`
+	GlobalCompactIncapableAccounts       int64                                   `json:"global_compact_incapable_accounts"`
+	GlobalHTTPStreamingCapableAccounts   int64                                   `json:"global_http_streaming_capable_accounts"`
+	GlobalHTTPStreamingIncapableAccounts int64                                   `json:"global_http_streaming_incapable_accounts"`
+	GlobalHTTPStreamingUnknownAccounts   int64                                   `json:"global_http_streaming_unknown_accounts"`
+	HasAnyCompactCapableAccount          bool                                    `json:"has_any_compact_capable_account"`
+	HasAnyStrongCohortAccount            bool                                    `json:"has_any_strong_cohort_account"`
+	HasAnyDegradedOnlyAccount            bool                                    `json:"has_any_degraded_only_account"`
+	HasAnyHTTPStreamingCapableAccount    bool                                    `json:"has_any_http_streaming_capable_account"`
+	Groups                               []OpenAIWSContinuationGroupAvailability `json:"groups"`
 }
 
 type OpenAIWSContinuationGroupAvailability struct {
-	GroupID                        int64    `json:"group_id"`
-	GroupName                      string   `json:"group_name"`
-	TotalSchedulableOpenAIAccounts int64    `json:"total_schedulable_openai_accounts"`
-	OAuthSchedulableAccounts       int64    `json:"oauth_schedulable_accounts"`
-	APIKeySchedulableAccounts      int64    `json:"apikey_schedulable_accounts"`
-	CompactCapableAccounts         int64    `json:"compact_capable_accounts"`
-	CompactIncapableAccounts       int64    `json:"compact_incapable_accounts"`
-	StrongCohortAccounts           int64    `json:"strong_cohort_accounts"`
-	DegradedOnlyAccounts           int64    `json:"degraded_only_accounts"`
-	CompactCapableAccountNames     []string `json:"compact_capable_account_names,omitempty"`
-	CompactIncapableAccountNames   []string `json:"compact_incapable_account_names,omitempty"`
-	StrongCohortAccountNames       []string `json:"strong_cohort_account_names,omitempty"`
-	DegradedOnlyAccountNames       []string `json:"degraded_only_account_names,omitempty"`
+	GroupID                            int64    `json:"group_id"`
+	GroupName                          string   `json:"group_name"`
+	TotalSchedulableOpenAIAccounts     int64    `json:"total_schedulable_openai_accounts"`
+	OAuthSchedulableAccounts           int64    `json:"oauth_schedulable_accounts"`
+	APIKeySchedulableAccounts          int64    `json:"apikey_schedulable_accounts"`
+	CompactCapableAccounts             int64    `json:"compact_capable_accounts"`
+	CompactIncapableAccounts           int64    `json:"compact_incapable_accounts"`
+	StrongCohortAccounts               int64    `json:"strong_cohort_accounts"`
+	DegradedOnlyAccounts               int64    `json:"degraded_only_accounts"`
+	HTTPStreamingCapableAccounts       int64    `json:"http_streaming_capable_accounts"`
+	HTTPStreamingIncapableAccounts     int64    `json:"http_streaming_incapable_accounts"`
+	HTTPStreamingUnknownAccounts       int64    `json:"http_streaming_unknown_accounts"`
+	CompactCapableAccountNames         []string `json:"compact_capable_account_names,omitempty"`
+	CompactIncapableAccountNames       []string `json:"compact_incapable_account_names,omitempty"`
+	StrongCohortAccountNames           []string `json:"strong_cohort_account_names,omitempty"`
+	DegradedOnlyAccountNames           []string `json:"degraded_only_account_names,omitempty"`
+	HTTPStreamingCapableAccountNames   []string `json:"http_streaming_capable_account_names,omitempty"`
+	HTTPStreamingIncapableAccountNames []string `json:"http_streaming_incapable_account_names,omitempty"`
+	HTTPStreamingUnknownAccountNames   []string `json:"http_streaming_unknown_account_names,omitempty"`
 }
 
 func (s *OpenAIGatewayService) OpenAIWSContinuationRuntimeSnapshot() OpenAIWSContinuationRuntimeSnapshot {
@@ -166,6 +176,18 @@ func (s *OpenAIGatewayService) buildOpenAIWSContinuationCapabilitySnapshot(ctx c
 			acc.snapshot.DegradedOnlyAccounts++
 			acc.snapshot.DegradedOnlyAccountNames = append(acc.snapshot.DegradedOnlyAccountNames, account.Name)
 		}
+		httpStreamingSupported, httpStreamingKnown, _ := s.ResolveOpenAIHTTPStreamingSupport(&account)
+		switch {
+		case httpStreamingKnown && httpStreamingSupported:
+			acc.snapshot.HTTPStreamingCapableAccounts++
+			acc.snapshot.HTTPStreamingCapableAccountNames = append(acc.snapshot.HTTPStreamingCapableAccountNames, account.Name)
+		case httpStreamingKnown:
+			acc.snapshot.HTTPStreamingIncapableAccounts++
+			acc.snapshot.HTTPStreamingIncapableAccountNames = append(acc.snapshot.HTTPStreamingIncapableAccountNames, account.Name)
+		default:
+			acc.snapshot.HTTPStreamingUnknownAccounts++
+			acc.snapshot.HTTPStreamingUnknownAccountNames = append(acc.snapshot.HTTPStreamingUnknownAccountNames, account.Name)
+		}
 	}
 
 	snapshot := OpenAIWSContinuationCapabilitySnapshot{}
@@ -184,6 +206,15 @@ func (s *OpenAIGatewayService) buildOpenAIWSContinuationCapabilitySnapshot(ctx c
 			snapshot.GlobalStrongCohortAccounts++
 		} else {
 			snapshot.GlobalDegradedOnlyAccounts++
+		}
+		httpStreamingSupported, httpStreamingKnown, _ := s.ResolveOpenAIHTTPStreamingSupport(&account)
+		switch {
+		case httpStreamingKnown && httpStreamingSupported:
+			snapshot.GlobalHTTPStreamingCapableAccounts++
+		case httpStreamingKnown:
+			snapshot.GlobalHTTPStreamingIncapableAccounts++
+		default:
+			snapshot.GlobalHTTPStreamingUnknownAccounts++
 		}
 
 		groupNames := make(map[int64]string)
@@ -205,6 +236,7 @@ func (s *OpenAIGatewayService) buildOpenAIWSContinuationCapabilitySnapshot(ctx c
 	snapshot.HasAnyCompactCapableAccount = snapshot.GlobalCompactCapableAccounts > 0
 	snapshot.HasAnyStrongCohortAccount = snapshot.GlobalStrongCohortAccounts > 0
 	snapshot.HasAnyDegradedOnlyAccount = snapshot.GlobalDegradedOnlyAccounts > 0
+	snapshot.HasAnyHTTPStreamingCapableAccount = snapshot.GlobalHTTPStreamingCapableAccounts > 0
 
 	if len(groups) == 0 {
 		return snapshot
@@ -217,6 +249,9 @@ func (s *OpenAIGatewayService) buildOpenAIWSContinuationCapabilitySnapshot(ctx c
 		sort.Strings(groupSnapshot.CompactIncapableAccountNames)
 		sort.Strings(groupSnapshot.StrongCohortAccountNames)
 		sort.Strings(groupSnapshot.DegradedOnlyAccountNames)
+		sort.Strings(groupSnapshot.HTTPStreamingCapableAccountNames)
+		sort.Strings(groupSnapshot.HTTPStreamingIncapableAccountNames)
+		sort.Strings(groupSnapshot.HTTPStreamingUnknownAccountNames)
 		snapshot.Groups = append(snapshot.Groups, groupSnapshot)
 	}
 	sort.Slice(snapshot.Groups, func(i, j int) bool {
