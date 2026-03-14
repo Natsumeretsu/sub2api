@@ -173,6 +173,8 @@ OpenAI 官方文档指向两个核心事实：
 - 当 `session_hash -> account_id` 粘连缺失，但 `session_hash -> last_response_id` 与 `response_id -> account_id` 仍可用时，优先从共享响应状态恢复 sticky account，并回填会话级粘连
 - HTTP 中途降级进入 `Responses(...)` 时，如果会话仍属于强 continuation cohort，则在账号选择前优先从共享会话状态回填 `previous_response_id`，并把 `requiredTransport` 收紧到 `WSv2`
 - 对强 continuation cohort 的 HTTP 中途降级，不再默认静默剥离 `previous_response_id`；只有弱会话或明确不满足 cohort 条件时才继续走旧的 strip 行为
+- `previous_response_id` 是否能在 HTTP fallback surface 上继续使用，必须单独建模，不能从 `WSv2` continuation capability 推导。当前 fork 对 OpenAI API-key surface 默认视为支持，对 OpenAI OAuth passthrough HTTP surface 默认视为不支持，除非账号显式声明 `openai_oauth_http_previous_response_id_supported=true`
+- 一旦请求仍然是 response-bound continuation，而当前选中的 HTTP fallback surface 又明确不支持 `previous_response_id`，handler 现在会直接返回显式 `503 Strong continuation is temporarily unavailable ...`，而不是把 anchored turn 继续发给 upstream 换回 `400 Unsupported parameter: previous_response_id`
 - `client_request_id` 中间件现在优先接受客户端显式传入的 `X-Client-Request-ID` / `Client-Request-ID`，再退回本地生成 UUID，作为后续 turn 级幂等键的最小基础
 - 当客户端显式提供 `client_request_id` 时，turn 级幂等键优先跟随该键，并且不会因为 `previous_response_id` 的对齐、剥离或陈旧漂移而改变；当客户端未显式提供时，网关会退回到 `session_hash + previous_response_id + payload fingerprint` 派生键，避免每次重试都重新生成完全无关的 UUID
 - `/responses` handler 在已有下游输出后，不再对同一 turn 做同账号或跨账号静默重试；如果 streaming 已开始，只补一个明确的终止错误，而不是重新生成第二份回答
@@ -203,6 +205,8 @@ OpenAI 官方文档指向两个核心事实：
 
 - 当前 `PackyCode` 这类 API-key relay 账号已经被明确排除出 strong continuation cohort
 - 如果 `PackyCode` 仍被误当成 strong account 参与切换，就会把本应稳定的 WS continuation 会话切碎，导致缓存命中骤降、输入 token 暴涨、并放大重复回答风险
+- 同样不能把“同一个 OAuth 账号既能走 WSv2 continuation”误当成“同一个 OAuth 账号的 HTTP fallback surface 也支持 `previous_response_id`”。2026-03-14 的 live 日志已经证明：same-account OAuth passthrough 也可能在 HTTP fallback 时直接返回 `Unsupported parameter: previous_response_id`
+- 因此当前设计把 capability 再拆成两层：`WS continuation capability` 负责能不能进入 strong cohort；`HTTP previous_response capability` 负责 anchored turn 还能不能跨到 HTTP fallback。前者不代表后者
 
 ### 4.2 暂不实施
 
@@ -226,6 +230,7 @@ OpenAI 官方文档指向两个核心事实：
   - `ws_to_http_mid_session_total`
   - `previous_response_recovered_from_session_total`
   - `previous_response_id_stripped_mid_session_total`
+  - `http_previous_response_unsupported_total`
   - `account_switch_with_cache_drop_total`
   - `strong_cohort_fallback_total`
   - `cache_affinity_selection_total`

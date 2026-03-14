@@ -41,7 +41,7 @@
 | WSv2 `ctx_pool/passthrough` 普通 turn | `strong` | 默认保留；必要时可对齐或单次降级 | 文本 turn 可做受控恢复 | 本地 turn + 会话状态 + 连接提示 | 当前主承诺面 |
 | WSv2 `store=false` + `function_call_output` | `strong` | 优先对齐；必要时单次 fresh-conn 恢复 | 本地校验 -> 有锚点恢复 -> 自包含单次重试 -> 否则 fail-close | `last_response_id`、`turn_state`、连接亲和 | 当前 continuation hardening 主覆盖面；会话状态从共享缓存回填本地时会跟随共享剩余 TTL |
 | WSv2 `store=true` | `degraded-strong` | 允许依赖上游 history | 本地仍做基础校验，但更偏透传 | 上游 history + 本地辅助状态 | 语义更依赖上游 |
-| HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；但对强 continuation cohort，请求进入 handler 时会优先从共享会话状态回填 `previous_response_id`，并显式输出请求/选中 cohort | 以 handler 前置校验为主；强 cohort 会优先保链，弱会话仍可能 strip；一旦已经向下游写出字节，不再静默重放同一 turn | 请求体 + 共享会话状态 + 上游 | 不承诺与 WSv2 等价，但不再把强会话静默打回弱 continuation，也不再对已出字节的 turn 做隐式账号切换重放；若客户端未显式提供 `client_request_id`，则 turn key 退回为 `session_hash + previous_response_id + payload fingerprint` 派生键 |
+| HTTP `/v1/responses` | `degraded` | 不等同于 WSv2；对强 continuation cohort，请求进入 handler 时仍会优先从共享会话状态回填 `previous_response_id`，但 handler 会再检查所选 HTTP fallback surface 是否真的支持该参数 | 以 handler 前置校验为主；强 cohort 只会在 HTTP surface 明确支持 `previous_response_id` 时继续保链，否则直接显式 `503` 软中断；弱会话仍可能 strip；一旦已经向下游写出字节，不再静默重放同一 turn | 请求体 + 共享会话状态 + 账号 capability + 上游 | 不承诺与 WSv2 等价，但不再把 strong anchored turn 静默打进不支持 `previous_response_id` 的 HTTP fallback；若客户端未显式提供 `client_request_id`，则 turn key 退回为 `session_hash + previous_response_id + payload fingerprint` 派生键 |
 | HTTP `/v1/responses/compact` | `degraded` | compact 单独规范化 | 不做 replay merge；非流式成功响应若为空体、半截 SSE、或缺 final response payload，会先进入协议级 failover，再受控重试 | compact 请求体 + 上游 | 不能假装与普通 `/responses` 完全等价，也不能再把 `200 + 空 body` 直接回给客户端 |
 | WSv1 / legacy websocket | `degraded` | 不在当前 hardening 主战场 | 不承诺与 WSv2 同等级恢复 | 旧状态面 | 仅保守兼容 |
 | 非原生 upstream / 跨协议变换 continuation | `unsupported-by-contract` | 不列入当前强承诺面 | 不在当前 fork 的 continuation correctness 保证范围内 | 具体 adapter 自身 | 后续需单独 matrix |
@@ -85,7 +85,23 @@
 
 这一步的目的，是阻断“把不支持 `/responses` WS transport 的 relay 账号误当成 strong account”这一类根因，避免账号切换时把强 continuation 会话切碎、把缓存亲和打掉、再把用户体验问题伪装成普通 fallback。
 
-### 3.2 当前明确不承诺的点
+### 3.2 HTTP fallback capability 也必须单独建模
+
+除了 `WS continuation capability`，live 日志已经证明还必须单独建模：
+
+- `HTTP previous_response capability`
+
+原因很直接：
+
+- 同一个 OAuth 账号可能支持 `WSv2` continuation
+- 但同一个 OAuth 账号的 HTTP passthrough fallback surface 仍然会返回 `Unsupported parameter: previous_response_id`
+
+因此当前 fork 的规则是：
+
+- OpenAI API-key 官方 surface 默认视为支持 HTTP `previous_response_id`
+- OpenAI OAuth passthrough HTTP surface 默认视为不支持，除非显式声明 capability
+- 一旦当前 turn 仍然是 response-bound continuation，而选中的 HTTP surface 又不支持 `previous_response_id`，handler 会直接软中断，不再把 anchored turn 继续上推
+### 3.3 当前明确不承诺的点
 
 - HTTP 与 WSv2 语义完全等价
 - 非原生 upstream continuation 与 native OpenAI continuation 完全等价
