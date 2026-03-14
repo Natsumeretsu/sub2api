@@ -257,6 +257,29 @@ OpenAI 官方文档指向两个核心事实：
 - turn 级 token 归因当前是 request 级闭环，不是 Prometheus 级的长期聚合面
 - 如果后续要做更细的 compact delta，需要单独补上 compact 前后窗口对账，而不是把当前 `billable_input_tokens/cache_read_tokens` 误解成 compact delta
 
+2026-03-15 的后续实现已经把这个缺口进一步收到了 request drilldown：
+
+- 当前 `ops_system_logs(message=openai.turn_token_attribution)` 会把 `session_hash` 与 compact 请求归因一起持久化
+- `GET /api/v1/admin/ops/requests?request_id=<...>` 现在会按同一 `session_hash` 回查最近一次 compact 请求，并返回 `compact_window`
+- `compact_window` 当前已 truthfully 给出：
+  - `previous_compact_request_id`
+  - `previous_compact_outcome`
+  - `previous_compact_age_ms`
+  - `previous_compact_input_tokens`
+  - `previous_compact_cache_read_tokens`
+  - `previous_compact_upstream_input_tokens`
+  - `billable_input_delta`
+  - `cache_read_delta`
+  - `upstream_input_delta`
+
+因此当前 request drilldown 已经能区分：
+
+- 当前 turn 是否走了 bridge
+- 当前 turn 的 replay / cache / billable 消耗
+- 当前 turn 与最近一次 compact 请求之间的真实窗口差异
+
+这不是“估算 compact 节省率”，而是“把 compact 前后相邻窗口的真实 request 对账结果直接返回给管理员”。
+
 ## 5. 后续路线图
 
 ### Phase 1：完成文档化与受控自包含重试

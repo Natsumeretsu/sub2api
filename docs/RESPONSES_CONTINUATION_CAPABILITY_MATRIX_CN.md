@@ -208,6 +208,17 @@
 - replay input 大小是多少
 - cache 读了多少
 - billable input 实际是多少
+- 当前 request 与最近一次 compact 请求之间的窗口差异是多少
+
+当前 `compact_window` 的语义已经明确下来：
+
+- 相关面不是“整个会话抽象估算”，而是“同一 `session_hash` 下最近一次 compact 请求与当前 request 的真实对账”
+- 只有当最近一次 compact 请求本身存在可用归因时，才会在 request drilldown 里返回 `compact_window`
+- 若最近一次 compact 请求 `compact_outcome=succeeded`，则 drilldown 会继续返回：
+  - `billable_input_delta`
+  - `cache_read_delta`
+  - `upstream_input_delta`
+- 若最近一次 compact 请求失败，当前则只返回 compact request 本身的 request id / outcome / age，不伪造 delta
 
 这条面当前还**不能** truthfully 回答：
 
