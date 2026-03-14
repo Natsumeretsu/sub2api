@@ -40,10 +40,10 @@ const (
 	codexCLIUserAgent      = "codex_cli_rs/0.104.0"
 	// codex_cli_only 拒绝时单个请求头日志长度上限（字符）
 	codexCLIOnlyHeaderValueMaxBytes = 256
-	// API-key passthrough 在真正提交首字节前做一个很短的预缓冲窗口，
-	// 优先把 challenge/半截流挡在写出之前，避免用户看到重复回答与 access log 上的伪成功。
-	openAIPassthroughStreamCommitLineThreshold = 4
-	openAIPassthroughStreamCommitByteThreshold = 4 * 1024
+	// API-key passthrough 在真正提交首字节前做一个更保守的预缓冲窗口，
+	// 优先等到终止事件，或累积到足够稳定的输出体量后再首字节出站。
+	openAIPassthroughStreamCommitLineThreshold = 12
+	openAIPassthroughStreamCommitByteThreshold = 16 * 1024
 	openAIPassthroughProtocolCooldownTimeout   = 3 * time.Second
 
 	// OpenAIParsedRequestBodyKey 缓存 handler 侧已解析的请求体，避免重复解析。
@@ -2873,8 +2873,8 @@ type openaiStreamingResultPassthrough struct {
 	firstTokenMs *int
 }
 
-func shouldCommitOpenAIPassthroughPrebuffer(sawDone bool, nonEmptyLines, bufferedBytes int) bool {
-	if sawDone {
+func shouldCommitOpenAIPassthroughPrebuffer(sawDone, sawTerminalEvent bool, nonEmptyLines, bufferedBytes int) bool {
+	if sawDone || sawTerminalEvent {
 		return true
 	}
 	if nonEmptyLines >= openAIPassthroughStreamCommitLineThreshold {
@@ -2938,6 +2938,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	var firstTokenMs *int
 	clientDisconnected := false
 	sawDone := false
+	sawTerminalEvent := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	prebuffer := bytes.NewBuffer(make([]byte, 0, 1024))
 	prebufferNonEmptyLines := 0
@@ -2959,6 +2960,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			trimmedData := strings.TrimSpace(data)
 			if trimmedData == "[DONE]" {
 				sawDone = true
+			} else {
+				switch strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String()) {
+				case "response.completed", "response.done", "response.failed":
+					sawTerminalEvent = true
+				}
 			}
 			if firstTokenMs == nil && trimmedData != "" && trimmedData != "[DONE]" {
 				ms := int(time.Since(startTime).Milliseconds())
@@ -2976,7 +2982,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				if strings.TrimSpace(line) != "" {
 					prebufferNonEmptyLines++
 				}
-				if shouldCommitOpenAIPassthroughPrebuffer(sawDone, prebufferNonEmptyLines, prebuffer.Len()) {
+				if shouldCommitOpenAIPassthroughPrebuffer(sawDone, sawTerminalEvent, prebufferNonEmptyLines, prebuffer.Len()) {
 					if _, err := bufferedWriter.Write(prebuffer.Bytes()); err != nil {
 						clientDisconnected = true
 						logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during initial buffered commit, continue draining upstream for usage: account=%d", account.ID)
