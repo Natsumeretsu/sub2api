@@ -687,7 +687,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		clientIP := ip.GetClientIP(c)
 
 		// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
-		h.submitUsageRecordTask(func(ctx context.Context) {
+		h.submitUsageRecordTaskWithContext(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:            result,
 				APIKey:            apiKey,
@@ -1089,7 +1089,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
 
-		h.submitUsageRecordTask(func(ctx context.Context) {
+		h.submitUsageRecordTaskWithContext(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:          result,
 				APIKey:          apiKey,
@@ -1652,7 +1652,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, result.ResponseHeaders)
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
-			h.submitUsageRecordTask(func(taskCtx context.Context) {
+			h.submitUsageRecordTaskWithContext(c.Request.Context(), func(taskCtx context.Context) {
 				if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 					Result:            result,
 					APIKey:            apiKey,
@@ -1818,6 +1818,34 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(task service.UsageRecordTas
 		}
 	}()
 	task(ctx)
+}
+
+func (h *OpenAIGatewayHandler) submitUsageRecordTaskWithContext(baseCtx context.Context, task service.UsageRecordTask) {
+	if task == nil {
+		return
+	}
+	if baseCtx == nil {
+		h.submitUsageRecordTask(task)
+		return
+	}
+	requestID, _ := baseCtx.Value(ctxkey.RequestID).(string)
+	clientRequestID, _ := baseCtx.Value(ctxkey.ClientRequestID).(string)
+	clientRequestIDProvided, _ := baseCtx.Value(ctxkey.ClientRequestIDProvided).(bool)
+	requestLogger := logger.FromContext(baseCtx)
+	h.submitUsageRecordTask(func(taskCtx context.Context) {
+		ctx := taskCtx
+		if requestID = strings.TrimSpace(requestID); requestID != "" {
+			ctx = context.WithValue(ctx, ctxkey.RequestID, requestID)
+		}
+		if clientRequestID = strings.TrimSpace(clientRequestID); clientRequestID != "" {
+			ctx = context.WithValue(ctx, ctxkey.ClientRequestID, clientRequestID)
+			ctx = context.WithValue(ctx, ctxkey.ClientRequestIDProvided, clientRequestIDProvided)
+		}
+		if requestLogger != nil {
+			ctx = logger.IntoContext(ctx, requestLogger)
+		}
+		task(ctx)
+	})
 }
 
 // handleConcurrencyError handles concurrency-related errors with proper 429 response

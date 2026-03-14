@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
@@ -128,6 +129,32 @@ func TestOpenAIGatewayHandlerSubmitUsageRecordTask_WithoutPool_TaskPanicRecovere
 		called.Store(true)
 	})
 	require.True(t, called.Load(), "panic 后后续任务应仍可执行")
+}
+
+func TestOpenAIGatewayHandlerSubmitUsageRecordTaskWithContext_PropagatesRequestIDs(t *testing.T) {
+	pool := newUsageRecordTestPool(t)
+	h := &OpenAIGatewayHandler{usageRecordWorkerPool: pool}
+
+	baseCtx := context.WithValue(context.Background(), ctxkey.RequestID, "req-usage-1")
+	baseCtx = context.WithValue(baseCtx, ctxkey.ClientRequestID, "creq-usage-1")
+	baseCtx = context.WithValue(baseCtx, ctxkey.ClientRequestIDProvided, true)
+
+	done := make(chan struct{})
+	h.submitUsageRecordTaskWithContext(baseCtx, func(ctx context.Context) {
+		requestID, _ := ctx.Value(ctxkey.RequestID).(string)
+		clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string)
+		clientRequestIDProvided, _ := ctx.Value(ctxkey.ClientRequestIDProvided).(bool)
+		require.Equal(t, "req-usage-1", requestID)
+		require.Equal(t, "creq-usage-1", clientRequestID)
+		require.True(t, clientRequestIDProvided)
+		close(done)
+	})
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("task not executed")
+	}
 }
 
 func TestSoraGatewayHandlerSubmitUsageRecordTask_WithPool(t *testing.T) {
