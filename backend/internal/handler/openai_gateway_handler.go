@@ -206,7 +206,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if anchor.FromSessionState && previousResponseID != "" {
 		c.Set(service.OpenAIContinuationPrevRecoveredCtxKey, true)
 	}
-	requiredTransport := service.ResolveOpenAIWSRequiredTransportForAnchor(anchor)
+	requiredTransport := service.ResolveOpenAIResponsesRequiredTransport(anchor, remoteCompact)
 
 	setOpsRequestContext(c, reqModel, reqStream, body)
 
@@ -420,6 +420,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				account,
 				reqModel,
 			)
+			if compactKnown {
+				c.Set(service.OpenAICompactPreviousResponseKnownCtxKey, true)
+				c.Set(service.OpenAICompactPreviousResponseSupportedCtxKey, compactSupported)
+			}
 			if compactProbeErr != nil {
 				reqLog.Warn("openai.remote_compact_capability_probe_failed",
 					zap.Int64("account_id", account.ID),

@@ -573,11 +573,34 @@ func TestOpenAIGatewayService_ResolveOpenAIWSContinuationAnchor_RecoversPrevious
 	require.True(t, anchor.StrongCohort)
 }
 
-func TestResolveOpenAIWSRequiredTransportForAnchor(t *testing.T) {
+func TestResolveOpenAIResponsesRequiredTransport(t *testing.T) {
 	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, ResolveOpenAIWSRequiredTransportForAnchor(OpenAIWSContinuationAnchor{
 		StrongCohort: true,
 	}))
 	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIWSRequiredTransportForAnchor(OpenAIWSContinuationAnchor{}))
+	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
+		StrongCohort: true,
+	}, true))
+	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
+		StrongCohort: true,
+	}, false))
+}
+
+func TestGetOpenAICompactPreviousResponseCapability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	known, supported := GetOpenAICompactPreviousResponseCapability(c)
+	require.False(t, known)
+	require.False(t, supported)
+
+	c.Set(OpenAICompactPreviousResponseKnownCtxKey, true)
+	c.Set(OpenAICompactPreviousResponseSupportedCtxKey, true)
+
+	known, supported = GetOpenAICompactPreviousResponseCapability(c)
+	require.True(t, known)
+	require.True(t, supported)
 }
 
 func TestBuildOpenAIStrongCohortDegradeFailover(t *testing.T) {

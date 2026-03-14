@@ -47,6 +47,10 @@ const (
 	OpenAIContinuationStrongCohortCtxKey = "openai_continuation_strong_cohort"
 	// OpenAIContinuationPrevRecoveredCtxKey 标记当前请求的 previous_response_id 是否从共享会话状态回填。
 	OpenAIContinuationPrevRecoveredCtxKey = "openai_continuation_prev_recovered"
+	// OpenAICompactPreviousResponseKnownCtxKey 标记当前 remote compact 请求的 previous_response 能力是否已判定。
+	OpenAICompactPreviousResponseKnownCtxKey = "openai_compact_previous_response_known"
+	// OpenAICompactPreviousResponseSupportedCtxKey 标记当前 remote compact 请求的 selected account 是否支持 previous_response_id。
+	OpenAICompactPreviousResponseSupportedCtxKey = "openai_compact_previous_response_supported"
 	// OpenAI WS Mode 失败后的重连次数上限（不含首次尝试）。
 	// 与 Codex 客户端保持一致：失败后最多重连 5 次。
 	openAIWSReconnectRetryLimit = 5
@@ -1111,6 +1115,13 @@ func ResolveOpenAIWSRequiredTransportForAnchor(anchor OpenAIWSContinuationAnchor
 	return OpenAIUpstreamTransportAny
 }
 
+func ResolveOpenAIResponsesRequiredTransport(anchor OpenAIWSContinuationAnchor, remoteCompact bool) OpenAIUpstreamTransport {
+	if remoteCompact {
+		return OpenAIUpstreamTransportAny
+	}
+	return ResolveOpenAIWSRequiredTransportForAnchor(anchor)
+}
+
 func IsOpenAIContinuationStrongCohort(c *gin.Context) bool {
 	if c == nil {
 		return false
@@ -1121,6 +1132,26 @@ func IsOpenAIContinuationStrongCohort(c *gin.Context) bool {
 	}
 	strong, _ := raw.(bool)
 	return strong
+}
+
+func GetOpenAICompactPreviousResponseCapability(c *gin.Context) (known bool, supported bool) {
+	if c == nil {
+		return false, false
+	}
+	rawKnown, ok := c.Get(OpenAICompactPreviousResponseKnownCtxKey)
+	if !ok {
+		return false, false
+	}
+	known, _ = rawKnown.(bool)
+	if !known {
+		return false, false
+	}
+	rawSupported, ok := c.Get(OpenAICompactPreviousResponseSupportedCtxKey)
+	if !ok {
+		return true, false
+	}
+	supported, _ = rawSupported.(bool)
+	return true, supported
 }
 
 func buildOpenAIStrongCohortDegradeFailover(account *Account, transport OpenAIUpstreamTransport) *UpstreamFailoverError {
@@ -1989,9 +2020,20 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		if _, has := reqBody["previous_response_id"]; has {
 			if isOpenAIRemoteCompactRequest(c) {
-				delete(reqBody, "previous_response_id")
-				bodyModified = true
-				markPatchDelete("previous_response_id")
+				compactKnown, compactSupported := GetOpenAICompactPreviousResponseCapability(c)
+				if compactSupported || !compactKnown {
+					logOpenAIWSModeInfo(
+						"compact_previous_response_preserved account_id=%d transport=%s capability_known=%t capability_supported=%t",
+						account.ID,
+						normalizeOpenAIWSLogValue(string(wsDecision.Transport)),
+						compactKnown,
+						compactSupported,
+					)
+				} else {
+					delete(reqBody, "previous_response_id")
+					bodyModified = true
+					markPatchDelete("previous_response_id")
+				}
 			} else if IsOpenAIContinuationStrongCohort(c) && GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP {
 				logOpenAIWSModeInfo(
 					"http_mid_session_previous_response_preserved account_id=%d transport=%s reason=strong_continuation_cohort previous_response_id_kind=%s",
