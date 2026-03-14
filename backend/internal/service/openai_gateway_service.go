@@ -351,13 +351,14 @@ type OpenAIGatewayService struct {
 	openaiWSPassthroughDialer     openAIWSClientDialer
 	openaiAccountStats            *openAIAccountRuntimeStats
 
-	openaiWSFallbackUntil       sync.Map // key: int64(accountID), value: time.Time
-	openaiWSRetryMetrics        openAIWSRetryMetrics
-	openaiWSTransportCapability sync.Map // key: int64(accountID), value: openAIWSTransportCapabilityObservation
-	openaiCompactCapability     sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
-	openaiHTTPPrevCapability    sync.Map // key: int64(accountID), value: openAIHTTPPreviousResponseCapabilityObservation
-	responseHeaderFilter        *responseheaders.CompiledHeaderFilter
-	codexSnapshotThrottle       *accountWriteThrottle
+	openaiWSFallbackUntil         sync.Map // key: int64(accountID), value: time.Time
+	openaiWSRetryMetrics          openAIWSRetryMetrics
+	openaiWSTransportCapability   sync.Map // key: int64(accountID), value: openAIWSTransportCapabilityObservation
+	openaiCompactCapability       sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
+	openaiHTTPPrevCapability      sync.Map // key: int64(accountID), value: openAIHTTPPreviousResponseCapabilityObservation
+	openaiHTTPStreamingCapability sync.Map // key: int64(accountID), value: openAIHTTPStreamingCapabilityObservation
+	responseHeaderFilter          *responseheaders.CompiledHeaderFilter
+	codexSnapshotThrottle         *accountWriteThrottle
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
@@ -4158,6 +4159,12 @@ func (s *OpenAIGatewayService) markOpenAIPassthroughProtocolFailure(ctx context.
 			zap.Error(err),
 		).Warn("openai.passthrough_protocol_cooldown_set_failed")
 		return
+	}
+	if account.IsOpenAIApiKey() {
+		switch strings.TrimSpace(reason) {
+		case "stream_missing_done", "stream_html_or_challenge_success":
+			s.setObservedOpenAIHTTPStreamingCapability(account, false, "protocol_failure:"+strings.TrimSpace(reason))
+		}
 	}
 	logger.FromContext(ctx).With(
 		zap.String("component", "service.openai_gateway"),

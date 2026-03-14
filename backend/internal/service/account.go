@@ -952,6 +952,46 @@ func (a *Account) openAIHTTPPreviousResponseCapabilityKeys() []string {
 	return keys
 }
 
+// ResolveOpenAIHTTPStreamingCapability 返回账号在 HTTP /responses streaming surface 上的能力声明。
+//
+// 设计原则：
+// 1. 这里只读取显式声明或运行时观测回灌，不做激进默认推断
+// 2. decided=false 表示未知，调度器可以作为降级候选继续尝试
+// 3. decided=true 且 supported=false 表示该 surface 已被证明不稳定，应优先避开
+func (a *Account) ResolveOpenAIHTTPStreamingCapability() (supported bool, decided bool, source string) {
+	if !a.IsOpenAI() {
+		return false, true, "non_openai"
+	}
+	for _, key := range a.openAIHTTPStreamingCapabilityKeys() {
+		if enabled, ok := a.getBoolCredential(key); ok {
+			return enabled, true, "credential:" + key
+		}
+		if enabled, ok := a.getBoolExtra(key); ok {
+			return enabled, true, "extra:" + key
+		}
+	}
+	return false, false, ""
+}
+
+func (a *Account) openAIHTTPStreamingCapabilityKeys() []string {
+	keys := make([]string, 0, 5)
+	if a != nil {
+		switch {
+		case a.IsOpenAIOAuth():
+			keys = append(keys, "openai_oauth_http_streaming_supported")
+		case a.IsOpenAIApiKey():
+			keys = append(keys, "openai_apikey_http_streaming_supported")
+		}
+	}
+	keys = append(keys,
+		"openai_http_streaming_supported",
+		"openai_responses_http_streaming_supported",
+		"responses_http_streaming_supported",
+		"http_streaming_supported",
+	)
+	return keys
+}
+
 func (a *Account) GetOpenAIAccessToken() string {
 	if !a.IsOpenAI() {
 		return ""

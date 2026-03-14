@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
 const (
@@ -35,6 +37,7 @@ type OpenAIAccountScheduleRequest struct {
 	StickyAccountID    int64
 	PreviousResponseID string
 	RequestedModel     string
+	StreamRequested    bool
 	CacheAffinityKey   string
 	RequiredTransport  OpenAIUpstreamTransport
 	RequiredCohort     OpenAIContinuationCohort
@@ -252,6 +255,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	req OpenAIAccountScheduleRequest,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	decision := OpenAIAccountScheduleDecision{}
+	req.StreamRequested = req.StreamRequested || isOpenAIStreamingRequested(ctx)
 	req.RequiredCohort = normalizeOpenAIRequiredCohort(req.RequiredCohort, req.RequiredTransport)
 	req.CacheAffinityKey = normalizeOpenAICacheAffinityKey(req.CacheAffinityKey, req.SessionHash, req.PreviousResponseID, req.RequestedModel)
 	decision.RequestedCohort = string(req.RequiredCohort)
@@ -274,7 +278,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			return nil, decision, err
 		}
 		if selection != nil && selection.Account != nil {
-			if !s.isAccountTransportCompatible(ctx, selection.Account, req.RequiredTransport, req.RequestedModel) {
+			if !s.isAccountEligibleForRequest(ctx, selection.Account, req) {
 				selection = nil
 			}
 		}
@@ -363,7 +367,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
 		return nil, nil
 	}
-	if !s.isAccountTransportCompatible(ctx, account, req.RequiredTransport, req.RequestedModel) {
+	if !s.isAccountEligibleForRequest(ctx, account, req) {
 		_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
 		return nil, nil
 	}
@@ -611,6 +615,8 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 
 	filtered := make([]*Account, 0, len(accounts))
 	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
+	streamFallbackFiltered := make([]*Account, 0, len(accounts))
+	streamFallbackLoadReq := make([]AccountWithConcurrency, 0, len(accounts))
 	requiredCohort := normalizeOpenAIRequiredCohort(req.RequiredCohort, req.RequiredTransport)
 	for i := range accounts {
 		account := &accounts[i]
@@ -628,11 +634,23 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		if !s.isAccountTransportCompatible(ctx, account, req.RequiredTransport, req.RequestedModel) {
 			continue
 		}
-		filtered = append(filtered, account)
-		loadReq = append(loadReq, AccountWithConcurrency{
+		loadEntry := AccountWithConcurrency{
 			ID:             account.ID,
 			MaxConcurrency: account.EffectiveLoadFactor(),
-		})
+		}
+		if req.StreamRequested && !s.isAccountHTTPStreamingCompatible(account, req.RequiredTransport) {
+			streamFallbackFiltered = append(streamFallbackFiltered, account)
+			streamFallbackLoadReq = append(streamFallbackLoadReq, loadEntry)
+			continue
+		}
+		filtered = append(filtered, account)
+		loadReq = append(loadReq, loadEntry)
+	}
+	if len(filtered) == 0 {
+		if req.StreamRequested && len(streamFallbackFiltered) > 0 {
+			filtered = streamFallbackFiltered
+			loadReq = streamFallbackLoadReq
+		}
 	}
 	if len(filtered) == 0 {
 		return nil, 0, 0, 0, false, errors.New("no available OpenAI accounts")
@@ -753,7 +771,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	for i := 0; i < len(selectionOrder); i++ {
 		candidate := selectionOrder[i]
 		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.RequestedModel)
-		if fresh == nil || !s.isAccountTransportCompatible(ctx, fresh, req.RequiredTransport, req.RequestedModel) {
+		if fresh == nil || !s.isAccountEligibleForRequest(ctx, fresh, req) {
 			continue
 		}
 		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
@@ -776,7 +794,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	// WaitPlan.MaxConcurrency 使用 Concurrency（非 EffectiveLoadFactor），因为 WaitPlan 控制的是 Redis 实际并发槽位等待。
 	for _, candidate := range selectionOrder {
 		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.RequestedModel)
-		if fresh == nil || !s.isAccountTransportCompatible(ctx, fresh, req.RequiredTransport, req.RequestedModel) {
+		if fresh == nil || !s.isAccountEligibleForRequest(ctx, fresh, req) {
 			continue
 		}
 		return &AccountSelectionResult{
@@ -793,6 +811,14 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	return nil, len(candidates), topK, loadSkew, cohortFallback, errors.New("no available accounts")
 }
 
+func isOpenAIStreamingRequested(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	streamRequested, _ := ctx.Value(ctxkey.OpenAIStreamRequested).(bool)
+	return streamRequested
+}
+
 func (s *defaultOpenAIAccountScheduler) isAccountTransportCompatible(
 	ctx context.Context,
 	account *Account,
@@ -807,6 +833,37 @@ func (s *defaultOpenAIAccountScheduler) isAccountTransportCompatible(
 		return false
 	}
 	return s.service.resolveOpenAIWSProtocolDecision(ctx, account, requestedModel).Transport == requiredTransport
+}
+
+func (s *defaultOpenAIAccountScheduler) isAccountEligibleForRequest(
+	ctx context.Context,
+	account *Account,
+	req OpenAIAccountScheduleRequest,
+) bool {
+	if !s.isAccountTransportCompatible(ctx, account, req.RequiredTransport, req.RequestedModel) {
+		return false
+	}
+	if req.StreamRequested && !s.isAccountHTTPStreamingCompatible(account, req.RequiredTransport) {
+		return false
+	}
+	return true
+}
+
+func (s *defaultOpenAIAccountScheduler) isAccountHTTPStreamingCompatible(
+	account *Account,
+	requiredTransport OpenAIUpstreamTransport,
+) bool {
+	if requiredTransport == OpenAIUpstreamTransportResponsesWebsocketV2 || requiredTransport == OpenAIUpstreamTransportResponsesWebsocket {
+		return true
+	}
+	if s == nil || s.service == nil || account == nil {
+		return false
+	}
+	supported, known, _ := s.service.ResolveOpenAIHTTPStreamingSupport(account)
+	if !known {
+		return true
+	}
+	return supported
 }
 
 func normalizeOpenAIRequiredCohort(requiredCohort OpenAIContinuationCohort, requiredTransport OpenAIUpstreamTransport) OpenAIContinuationCohort {
@@ -962,6 +1019,7 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 		StickyAccountID:    stickyAccountID,
 		PreviousResponseID: previousResponseID,
 		RequestedModel:     requestedModel,
+		StreamRequested:    isOpenAIStreamingRequested(ctx),
 		CacheAffinityKey:   affinityKey,
 		RequiredTransport:  requiredTransport,
 		RequiredCohort:     requiredCohort,

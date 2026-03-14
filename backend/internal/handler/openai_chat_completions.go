@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -110,12 +111,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	requestCtx := context.WithValue(c.Request.Context(), ctxkey.OpenAIStreamRequested, reqStream)
 
 	for {
 		c.Set("openai_chat_completions_fallback_model", "")
 		reqLog.Debug("openai_chat_completions.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
-			c.Request.Context(),
+			requestCtx,
 			apiKey.GroupID,
 			"",
 			sessionHash,
@@ -138,7 +140,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						zap.String("default_mapped_model", defaultModel),
 					)
 					selection, scheduleDecision, err = h.gatewayService.SelectAccountWithScheduler(
-						c.Request.Context(),
+						requestCtx,
 						apiKey.GroupID,
 						"",
 						sessionHash,

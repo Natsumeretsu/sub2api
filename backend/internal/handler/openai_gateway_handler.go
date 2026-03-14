@@ -314,13 +314,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	requestCtx := context.WithValue(c.Request.Context(), ctxkey.OpenAIStreamRequested, reqStream)
 
 	for {
 		service.SetOpenAIHTTPPreviousResponseCapability(c, false, false)
 		// Select account supporting the requested model
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
-			c.Request.Context(),
+			requestCtx,
 			apiKey.GroupID,
 			previousResponseID,
 			sessionHash,
@@ -921,13 +922,14 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	requestCtx := context.WithValue(c.Request.Context(), ctxkey.OpenAIStreamRequested, reqStream)
 
 	for {
 		// 清除上一次迭代的降级模型标记，避免残留影响本次迭代
 		c.Set("openai_messages_fallback_model", "")
 		reqLog.Debug("openai_messages.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
-			c.Request.Context(),
+			requestCtx,
 			apiKey.GroupID,
 			"", // no previous_response_id
 			sessionHash,
@@ -951,7 +953,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						zap.String("default_mapped_model", defaultModel),
 					)
 					selection, scheduleDecision, err = h.gatewayService.SelectAccountWithScheduler(
-						c.Request.Context(),
+						requestCtx,
 						apiKey.GroupID,
 						"",
 						sessionHash,
@@ -1469,9 +1471,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	)
 	anchor := h.gatewayService.ResolveOpenAIWSContinuationAnchor(ctx, apiKey.GroupID, sessionHash, previousResponseID)
 	wsPromptCacheKey := strings.TrimSpace(gjson.GetBytes(firstMessage, "prompt_cache_key").String())
+	wsScheduleCtx := context.WithValue(ctx, ctxkey.OpenAIStreamRequested, true)
 	selectWSIngressAccount := func(requiredTransport service.OpenAIUpstreamTransport) (*service.AccountSelectionResult, service.OpenAIAccountScheduleDecision, error) {
 		return h.gatewayService.SelectAccountWithScheduler(
-			ctx,
+			wsScheduleCtx,
 			apiKey.GroupID,
 			previousResponseID,
 			sessionHash,

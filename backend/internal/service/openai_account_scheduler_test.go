@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -133,6 +134,56 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_PreviousResponseSticky(
 	require.Equal(t, openAIAccountScheduleLayerPreviousResponse, decision.Layer)
 	require.True(t, decision.StickyPreviousHit)
 	require.Equal(t, account.ID, cache.sessionBindings["openai:session_hash_001"])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedAvoidsObservedHTTPStreamingUnsupportedAccount(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.OpenAIStreamRequested, true)
+	groupID := int64(10115)
+	risky := Account{
+		ID:          41001,
+		Name:        "PackyCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	stable := Account{
+		ID:          41002,
+		Name:        "RightCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    10,
+	}
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{risky, stable}},
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	svc.setObservedOpenAIHTTPStreamingCapability(&risky, false, "protocol_failure:stream_missing_done")
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"",
+		"gpt-5.4",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, stable.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}

@@ -58,4 +58,7 @@ const (
 
 	// ClaudeCodeVersion stores the extracted Claude Code version from User-Agent (e.g. "2.1.22")
 	ClaudeCodeVersion Key = "ctx_claude_code_version"
+
+	// OpenAIStreamRequested 标识当前 OpenAI 请求是否显式请求了 streaming。
+	OpenAIStreamRequested Key = "ctx_openai_stream_requested"
 )
