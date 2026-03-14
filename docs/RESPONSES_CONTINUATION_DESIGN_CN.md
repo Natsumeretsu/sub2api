@@ -190,23 +190,30 @@ OpenAI 官方文档指向两个核心事实：
 截至当前 fork 基线：
 
 - `Team号池`
-  - `12` 个可调度 OpenAI 账号
-  - `11` 个 compact-capable OAuth 账号
-  - `11` 个 `strong cohort` 账号
-  - `1` 个 `degraded-only` 账号：`PackyCode`
+  - 当前只有 `1` 个可调度 OpenAI 账号
+  - 即 `RightCode`
+  - `compact_capable_accounts = 1`
+  - `strong_cohort_accounts = 0`
+  - `degraded_only_accounts = 1`
 - `Private`
   - `1` 个可调度 OpenAI 账号
-  - 即 `PackyCode`
-  - `compact_capable_accounts = 0`
+  - 即 `RightCode`
+  - `compact_capable_accounts = 1`
   - `strong_cohort_accounts = 0`
   - `degraded_only_accounts = 1`
 
+同时，`PackyCode` 仍然存在于 `Team号池` 与 `Private` 的账号关联里，但当前 live 上 `PackyCode.schedulable = false`，因此不会进入本轮 runtime capability 统计或 scheduler 候选。
+
 这条 live truth 的意义不是“账号切换天然就会抖”，而是：
 
-- 当前 `PackyCode` 这类 API-key relay 账号已经被明确排除出 strong continuation cohort
-- 如果 `PackyCode` 仍被误当成 strong account 参与切换，就会把本应稳定的 WS continuation 会话切碎，导致缓存命中骤降、输入 token 暴涨、并放大重复回答风险
+- 当前 live 的根因已经不再是 “OAuth strong + API-key degraded 混跑”，而是 **同一个 API-key surface 需要被拆成三层 capability**：
+  - `/responses` WS transport capability
+  - `/responses` HTTP `previous_response_id` capability
+  - `/responses/compact` HTTP `previous_response_id` capability
+- `RightCode` 当前已经通过 live probe 证明：虽然 `RightCode` 仍属于 `degraded-only`，但 `RightCode` 的 `/responses/compact` HTTP surface 支持 `previous_response_id`
+- 如果继续把 “有锚点的 compact 请求” 强行按 `WSv2 strong cohort` 去调度，就会在 scheduler 阶段直接把 `RightCode` 筛空，表现成 `503 no available OpenAI accounts`
 - 同样不能把“同一个 OAuth 账号既能走 WSv2 continuation”误当成“同一个 OAuth 账号的 HTTP fallback surface 也支持 `previous_response_id`”。2026-03-14 的 live 日志已经证明：same-account OAuth passthrough 也可能在 HTTP fallback 时直接返回 `Unsupported parameter: previous_response_id`
-- 因此当前设计把 capability 再拆成两层：`WS continuation capability` 负责能不能进入 strong cohort；`HTTP previous_response capability` 负责 anchored turn 还能不能跨到 HTTP fallback。前者不代表后者
+- 因此当前设计已经把 capability 再拆成三层：`WS continuation capability` 负责能不能进入 strong cohort；`HTTP previous_response capability` 负责 anchored turn 能不能跨到普通 HTTP fallback；`remote compact previous_response capability` 负责 `/responses/compact` 能不能继续保锚点。前两层都不代表第三层
 
 ### 4.2 暂不实施
 

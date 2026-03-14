@@ -80,12 +80,28 @@
 
 当前 live capability 快照因此已经收敛为：
 
-- `Team号池`：`11 strong + 1 degraded-only(PackyCode)`
-- `Private`：`0 strong + 1 degraded-only(PackyCode)`
+- `Team号池`：`0 strong + 1 degraded-only(RightCode schedulable)`；`PackyCode` 当前存在关联但 `schedulable=false`
+- `Private`：`0 strong + 1 degraded-only(RightCode schedulable)`；`PackyCode` 当前存在关联但 `schedulable=false`
 
 这一步的目的，是阻断“把不支持 `/responses` WS transport 的 relay 账号误当成 strong account”这一类根因，避免账号切换时把强 continuation 会话切碎、把缓存亲和打掉、再把用户体验问题伪装成普通 fallback。
 
 ### 3.2 HTTP fallback capability 也必须单独建模
+
+### 3.3 `/responses/compact` 的 anchored capability 也必须单独建模
+
+2026-03-14 的 live probe 已经证明，当前 `RightCode` 这一类 API-key OpenAI surface 不能再被粗暴近似成“API-key = compact 不支持”：
+
+- 直接上游探针命中 `https://right.codes/codex/v1/responses/compact`
+- 带 `previous_response_id` 的 probe 请求返回 `400 previous_response_not_found`
+- 这说明 `RightCode` 的 compact route 存在，并且会正确解析 `previous_response_id`
+
+因此当前 fork 不能再把 “anchored compact 请求” 继续套用 `WS strong cohort -> requiredTransport=ResponsesWebsocketV2` 这套推导。对 `/responses/compact`，正确模型是：
+
+- scheduler 不强制要求 `ResponsesWebsocketV2`
+- 对 selected account 先做 compact capability probe
+- `known + supported` 时保留 `previous_response_id`
+- `known + unsupported` 时显式切走或 fail-fast
+- `unknown` 时优先保留，让上游给出真实协议语义，而不是静默剥离锚点放大 token 消耗
 
 除了 `WS continuation capability`，live 日志已经证明还必须单独建模：
 
