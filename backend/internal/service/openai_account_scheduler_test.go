@@ -344,7 +344,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedFallback
 		Status:      StatusActive,
 		Schedulable: true,
 		Concurrency: 1,
-		Priority:    10,
+		Priority:    0,
 	}
 
 	svc := &OpenAIGatewayService{
@@ -356,23 +356,51 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedFallback
 	svc.setObservedOpenAIHTTPStreamingCapability(&right, false, "probe_stream_missing_done")
 	svc.SetObservedOpenAIResponsesCompactCapability(&right, true, "probe_supported_previous_response_id")
 
-	selection, decision, err := svc.SelectAccountWithScheduler(
-		ctx,
-		&groupID,
-		"",
-		"",
-		"gpt-5.4",
-		nil,
-		OpenAIUpstreamTransportAny,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, selection)
-	require.NotNil(t, selection.Account)
-	require.Equal(t, right.ID, selection.Account.ID)
-	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
-	if selection.ReleaseFunc != nil {
-		selection.ReleaseFunc()
+	sessionHashes := []string{
+		"session_hash_probe_6",
+		"session_hash_probe_13",
+		"session_hash_probe_15",
+		"session_hash_probe_31",
 	}
+	for _, sessionHash := range sessionHashes {
+		selection, decision, err := svc.getOpenAIAccountScheduler().Select(ctx, OpenAIAccountScheduleRequest{
+			GroupID:           &groupID,
+			SessionHash:       sessionHash,
+			RequestedModel:    "gpt-5.4",
+			StreamRequested:   true,
+			CacheAffinityKey:  "degraded-bridge-fallback",
+			RequiredTransport: OpenAIUpstreamTransportAny,
+			RequiredCohort:    OpenAIContinuationCohortDegraded,
+		})
+		require.NoError(t, err, sessionHash)
+		require.NotNil(t, selection, sessionHash)
+		require.NotNil(t, selection.Account, sessionHash)
+		require.Equal(t, right.ID, selection.Account.ID, sessionHash)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	}
+}
+
+func TestFilterPreferredOpenAIHTTPStreamFallbackCandidates_UsesHighestBridgePreference(t *testing.T) {
+	packy := openAIAccountCandidateScore{
+		account:          &Account{ID: 44001, Name: "PackyCode"},
+		bridgePreference: 0,
+	}
+	right := openAIAccountCandidateScore{
+		account:          &Account{ID: 44002, Name: "RightCode"},
+		bridgePreference: 0.8,
+	}
+	peer := openAIAccountCandidateScore{
+		account:          &Account{ID: 44003, Name: "BridgePeer"},
+		bridgePreference: 0.8,
+	}
+
+	filtered := filterPreferredOpenAIHTTPStreamFallbackCandidates([]openAIAccountCandidateScore{packy, right, peer})
+	require.Len(t, filtered, 2)
+	require.Equal(t, int64(44002), filtered[0].account.ID)
+	require.Equal(t, int64(44003), filtered[1].account.ID)
 }
 
 func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedPrefersCapableOverUnknown(t *testing.T) {

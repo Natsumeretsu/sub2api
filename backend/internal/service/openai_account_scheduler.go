@@ -788,6 +788,10 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			item.score += 2.0 * item.bridgePreference
 		}
 	}
+	if usingStreamFallbackBucket {
+		candidates = filterPreferredOpenAIHTTPStreamFallbackCandidates(candidates)
+		loadSkew = calcOpenAIAccountCandidateLoadSkew(candidates)
+	}
 	if len(candidates) == 0 {
 		return nil, 0, 0, 0, cohortFallback, errors.New("no available OpenAI accounts")
 	}
@@ -931,6 +935,56 @@ func (s *defaultOpenAIAccountScheduler) computeOpenAIHTTPStreamFallbackPreferenc
 		score += 0.45
 	}
 	return clamp01(score)
+}
+
+func filterPreferredOpenAIHTTPStreamFallbackCandidates(
+	candidates []openAIAccountCandidateScore,
+) []openAIAccountCandidateScore {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	maxPreference := candidates[0].bridgePreference
+	minPreference := candidates[0].bridgePreference
+	for i := 1; i < len(candidates); i++ {
+		preference := candidates[i].bridgePreference
+		if preference > maxPreference {
+			maxPreference = preference
+		}
+		if preference < minPreference {
+			minPreference = preference
+		}
+	}
+	if maxPreference <= 0 || almostEqualFloat64(maxPreference, minPreference) {
+		return candidates
+	}
+	filtered := make([]openAIAccountCandidateScore, 0, len(candidates))
+	for _, candidate := range candidates {
+		if almostEqualFloat64(candidate.bridgePreference, maxPreference) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	if len(filtered) == 0 {
+		return candidates
+	}
+	return filtered
+}
+
+func calcOpenAIAccountCandidateLoadSkew(candidates []openAIAccountCandidateScore) float64 {
+	if len(candidates) == 0 {
+		return 0
+	}
+	loadRateSum := 0.0
+	loadRateSumSquares := 0.0
+	for _, candidate := range candidates {
+		loadRate := float64(candidate.loadInfo.LoadRate)
+		loadRateSum += loadRate
+		loadRateSumSquares += loadRate * loadRate
+	}
+	return calcLoadSkewByMoments(loadRateSum, loadRateSumSquares, len(candidates))
+}
+
+func almostEqualFloat64(left float64, right float64) bool {
+	return math.Abs(left-right) <= 1e-9
 }
 
 func normalizeOpenAIRequiredCohort(requiredCohort OpenAIContinuationCohort, requiredTransport OpenAIUpstreamTransport) OpenAIContinuationCohort {
