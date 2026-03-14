@@ -218,11 +218,19 @@
   - `billable_input_delta`
   - `cache_read_delta`
   - `upstream_input_delta`
+- 若最近一次 compact 请求之后已经形成可归因窗口，则 drilldown 还会继续返回：
+  - `window_turn_count`
+  - `window_bridge_turn_count`
+  - `window_replay_input_items`
+  - `window_replay_input_bytes`
+  - `window_billable_input_tokens`
+  - `window_cache_read_tokens`
+  - `window_upstream_input_tokens`
 - 若最近一次 compact 请求失败，当前则只返回 compact request 本身的 request id / outcome / age，不伪造 delta
 
 这条面当前还**不能** truthfully 回答：
 
-- compact 前后 token 差异的精确 delta
+- compact 之外更长链路上的全局节省率
 - 长周期聚合后的 per-account compact 节省率
 
 ## 5. 与使用逻辑完备优先的关系

@@ -271,12 +271,20 @@ OpenAI 官方文档指向两个核心事实：
   - `billable_input_delta`
   - `cache_read_delta`
   - `upstream_input_delta`
+  - `window_turn_count`
+  - `window_bridge_turn_count`
+  - `window_replay_input_items`
+  - `window_replay_input_bytes`
+  - `window_billable_input_tokens`
+  - `window_cache_read_tokens`
+  - `window_upstream_input_tokens`
 
 因此当前 request drilldown 已经能区分：
 
 - 当前 turn 是否走了 bridge
 - 当前 turn 的 replay / cache / billable 消耗
 - 当前 turn 与最近一次 compact 请求之间的真实窗口差异
+- 当前 turn 所在的 post-compact 窗口，到目前为止累计了多少 turn / replay / billable / cache / upstream input
 
 这不是“估算 compact 节省率”，而是“把 compact 前后相邻窗口的真实 request 对账结果直接返回给管理员”。
 
