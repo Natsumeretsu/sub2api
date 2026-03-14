@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -241,6 +244,128 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedAvoidsCa
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
 	require.Equal(t, stable.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedProbesUnknownHTTPStreamingCandidate(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.OpenAIStreamRequested, true)
+	groupID := int64(10117)
+	risky := Account{
+		ID:          43001,
+		Name:        "PackyCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	stable := Account{
+		ID:          43002,
+		Name:        "RightCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    10,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://right.codes/codex/v1",
+		},
+	}
+	upstream := &openAIHTTPStreamingProbeUpstreamStub{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_probe_1"}}`,
+				`data: {"type":"response.output_text.delta","delta":"ok"}`,
+				`data: {"type":"response.completed","response":{"id":"resp_probe_1"}}`,
+				`data: [DONE]`,
+			}, "\n"))),
+		},
+	}
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{risky, stable}},
+		httpUpstream:       upstream,
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	svc.setObservedOpenAIHTTPStreamingCapability(&risky, false, "protocol_failure:stream_missing_done")
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"",
+		"gpt-5.4",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, stable.ID, selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	require.Equal(t, 1, upstream.callCount)
+
+	supported, known, source := svc.ResolveOpenAIHTTPStreamingSupport(selection.Account)
+	require.True(t, supported)
+	require.True(t, known)
+	require.Equal(t, "probe_stream_done_supported", source)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StreamRequestedPrefersCapableOverUnknown(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.OpenAIStreamRequested, true)
+	groupID := int64(10118)
+	unknown := Account{
+		ID:          44001,
+		Name:        "UnknownCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+	}
+	capable := Account{
+		ID:          44002,
+		Name:        "RightCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    10,
+	}
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{unknown, capable}},
+		cfg:                &config.Config{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+	svc.setObservedOpenAIHTTPStreamingCapability(&capable, true, "runtime_saw_done")
+
+	selection, decision, err := svc.SelectAccountWithScheduler(
+		ctx,
+		&groupID,
+		"",
+		"",
+		"gpt-5.4",
+		nil,
+		OpenAIUpstreamTransportAny,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, capable.ID, selection.Account.ID)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()

@@ -615,6 +615,10 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 
 	filtered := make([]*Account, 0, len(accounts))
 	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
+	streamCapableFiltered := make([]*Account, 0, len(accounts))
+	streamCapableLoadReq := make([]AccountWithConcurrency, 0, len(accounts))
+	streamUnknownFiltered := make([]*Account, 0, len(accounts))
+	streamUnknownLoadReq := make([]AccountWithConcurrency, 0, len(accounts))
 	streamFallbackFiltered := make([]*Account, 0, len(accounts))
 	streamFallbackLoadReq := make([]AccountWithConcurrency, 0, len(accounts))
 	requiredCohort := normalizeOpenAIRequiredCohort(req.RequiredCohort, req.RequiredTransport)
@@ -638,16 +642,39 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			ID:             account.ID,
 			MaxConcurrency: account.EffectiveLoadFactor(),
 		}
-		if req.StreamRequested && !s.isAccountHTTPStreamingCompatible(account, req.RequiredTransport) {
-			streamFallbackFiltered = append(streamFallbackFiltered, account)
-			streamFallbackLoadReq = append(streamFallbackLoadReq, loadEntry)
-			continue
+		if req.StreamRequested && req.RequiredTransport != OpenAIUpstreamTransportResponsesWebsocketV2 && req.RequiredTransport != OpenAIUpstreamTransportResponsesWebsocket {
+			supported, known, _, err := s.service.ResolveOpenAIHTTPStreamingSupportForRequest(ctx, account, req.RequestedModel)
+			switch {
+			case err != nil:
+				streamUnknownFiltered = append(streamUnknownFiltered, account)
+				streamUnknownLoadReq = append(streamUnknownLoadReq, loadEntry)
+				continue
+			case known && supported:
+				streamCapableFiltered = append(streamCapableFiltered, account)
+				streamCapableLoadReq = append(streamCapableLoadReq, loadEntry)
+				continue
+			case known:
+				streamFallbackFiltered = append(streamFallbackFiltered, account)
+				streamFallbackLoadReq = append(streamFallbackLoadReq, loadEntry)
+				continue
+			default:
+				streamUnknownFiltered = append(streamUnknownFiltered, account)
+				streamUnknownLoadReq = append(streamUnknownLoadReq, loadEntry)
+				continue
+			}
 		}
 		filtered = append(filtered, account)
 		loadReq = append(loadReq, loadEntry)
 	}
-	if len(filtered) == 0 {
-		if req.StreamRequested && len(streamFallbackFiltered) > 0 {
+	if req.StreamRequested && req.RequiredTransport != OpenAIUpstreamTransportResponsesWebsocketV2 && req.RequiredTransport != OpenAIUpstreamTransportResponsesWebsocket {
+		switch {
+		case len(streamCapableFiltered) > 0:
+			filtered = streamCapableFiltered
+			loadReq = streamCapableLoadReq
+		case len(streamUnknownFiltered) > 0:
+			filtered = streamUnknownFiltered
+			loadReq = streamUnknownLoadReq
+		case len(filtered) == 0 && len(streamFallbackFiltered) > 0:
 			filtered = streamFallbackFiltered
 			loadReq = streamFallbackLoadReq
 		}
@@ -843,15 +870,17 @@ func (s *defaultOpenAIAccountScheduler) isAccountEligibleForRequest(
 	if !s.isAccountTransportCompatible(ctx, account, req.RequiredTransport, req.RequestedModel) {
 		return false
 	}
-	if req.StreamRequested && !s.isAccountHTTPStreamingCompatible(account, req.RequiredTransport) {
+	if req.StreamRequested && !s.isAccountHTTPStreamingCompatible(ctx, account, req.RequiredTransport, req.RequestedModel) {
 		return false
 	}
 	return true
 }
 
 func (s *defaultOpenAIAccountScheduler) isAccountHTTPStreamingCompatible(
+	ctx context.Context,
 	account *Account,
 	requiredTransport OpenAIUpstreamTransport,
+	requestedModel string,
 ) bool {
 	if requiredTransport == OpenAIUpstreamTransportResponsesWebsocketV2 || requiredTransport == OpenAIUpstreamTransportResponsesWebsocket {
 		return true
@@ -859,7 +888,10 @@ func (s *defaultOpenAIAccountScheduler) isAccountHTTPStreamingCompatible(
 	if s == nil || s.service == nil || account == nil {
 		return false
 	}
-	supported, known, _ := s.service.ResolveOpenAIHTTPStreamingSupport(account)
+	supported, known, _, err := s.service.ResolveOpenAIHTTPStreamingSupportForRequest(ctx, account, requestedModel)
+	if err != nil {
+		return true
+	}
 	if !known {
 		return true
 	}

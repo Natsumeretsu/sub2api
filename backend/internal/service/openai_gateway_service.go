@@ -29,6 +29,7 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -357,6 +358,7 @@ type OpenAIGatewayService struct {
 	openaiCompactCapability       sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
 	openaiHTTPPrevCapability      sync.Map // key: int64(accountID), value: openAIHTTPPreviousResponseCapabilityObservation
 	openaiHTTPStreamingCapability sync.Map // key: int64(accountID), value: openAIHTTPStreamingCapabilityObservation
+	openaiHTTPStreamingProbeSF    singleflight.Group
 	responseHeaderFilter          *responseheaders.CompiledHeaderFilter
 	codexSnapshotThrottle         *accountWriteThrottle
 }
