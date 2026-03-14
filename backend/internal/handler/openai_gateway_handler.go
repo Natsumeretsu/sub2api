@@ -1818,8 +1818,95 @@ func (h *OpenAIGatewayHandler) ensureForwardErrorResponse(c *gin.Context, stream
 	if c == nil || c.Writer == nil || c.Writer.Written() {
 		return false
 	}
+	if status, errType, message, ok := resolveOpenAIForwardStructuredUpstreamError(c); ok {
+		h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+		return true
+	}
 	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed", streamStarted)
 	return true
+}
+
+func resolveOpenAIForwardStructuredUpstreamError(c *gin.Context) (status int, errType, message string, ok bool) {
+	if c == nil {
+		return 0, "", "", false
+	}
+	upstreamStatus, hasStatus := openAIUpstreamStatusCodeFromContext(c)
+	upstreamMessage, upstreamDetail := openAIUpstreamMessageFromContext(c)
+	if !hasStatus && upstreamMessage == "" && upstreamDetail == "" {
+		return 0, "", "", false
+	}
+	combined := strings.ToLower(strings.TrimSpace(upstreamMessage + "\n" + upstreamDetail))
+	if strings.Contains(combined, "unsupported parameter: previous_response_id") {
+		return http.StatusServiceUnavailable, "api_error", openAIHTTPPreviousResponseUnsupportedMessage(), true
+	}
+	if !hasStatus || upstreamStatus <= 0 {
+		if upstreamMessage != "" {
+			return http.StatusBadGateway, "upstream_error", upstreamMessage, true
+		}
+		return 0, "", "", false
+	}
+	switch upstreamStatus {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		errType = "invalid_request_error"
+	case http.StatusNotFound:
+		errType = "not_found_error"
+	case http.StatusConflict:
+		errType = "conflict_error"
+	case http.StatusTooManyRequests:
+		errType = "rate_limit_error"
+	default:
+		if upstreamStatus >= 400 && upstreamStatus < 500 {
+			errType = "api_error"
+		} else {
+			return 0, "", "", false
+		}
+	}
+	if upstreamMessage == "" {
+		upstreamMessage = "Upstream request failed"
+	}
+	return upstreamStatus, errType, upstreamMessage, true
+}
+
+func openAIUpstreamStatusCodeFromContext(c *gin.Context) (int, bool) {
+	if c == nil {
+		return 0, false
+	}
+	value, exists := c.Get(service.OpsUpstreamStatusCodeKey)
+	if !exists {
+		return 0, false
+	}
+	switch t := value.(type) {
+	case int:
+		return t, t > 0
+	case int32:
+		code := int(t)
+		return code, code > 0
+	case int64:
+		code := int(t)
+		return code, code > 0
+	case float64:
+		code := int(t)
+		return code, code > 0
+	default:
+		return 0, false
+	}
+}
+
+func openAIUpstreamMessageFromContext(c *gin.Context) (message string, detail string) {
+	if c == nil {
+		return "", ""
+	}
+	if value, ok := c.Get(service.OpsUpstreamErrorMessageKey); ok {
+		if text, ok := value.(string); ok {
+			message = strings.TrimSpace(text)
+		}
+	}
+	if value, ok := c.Get(service.OpsUpstreamErrorDetailKey); ok {
+		if text, ok := value.(string); ok {
+			detail = strings.TrimSpace(text)
+		}
+	}
+	return message, detail
 }
 
 func shouldLogOpenAIForwardFailureAsWarn(c *gin.Context, wroteFallback bool) bool {

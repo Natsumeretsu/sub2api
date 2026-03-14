@@ -155,6 +155,52 @@ func TestOpenAIEnsureForwardErrorResponse_WritesFallbackWhenNotWritten(t *testin
 	assert.Equal(t, "Upstream request failed", errorObj["message"])
 }
 
+func TestOpenAIEnsureForwardErrorResponse_UsesStructuredUpstream400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses/compact", nil)
+	c.Set(service.OpsUpstreamStatusCodeKey, http.StatusBadRequest)
+	c.Set(service.OpsUpstreamErrorMessageKey, "Previous response with id 'resp_probe_dummy' not found.")
+
+	h := &OpenAIGatewayHandler{}
+	wrote := h.ensureForwardErrorResponse(c, false)
+
+	require.True(t, wrote)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	var parsed map[string]any
+	err := json.Unmarshal(w.Body.Bytes(), &parsed)
+	require.NoError(t, err)
+	errorObj, ok := parsed["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "invalid_request_error", errorObj["type"])
+	assert.Equal(t, "Previous response with id 'resp_probe_dummy' not found.", errorObj["message"])
+}
+
+func TestOpenAIEnsureForwardErrorResponse_MapsUnsupportedPreviousResponseIDToSoftInterrupt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses", nil)
+	c.Set(service.OpsUpstreamStatusCodeKey, http.StatusBadRequest)
+	c.Set(service.OpsUpstreamErrorMessageKey, "Unsupported parameter: previous_response_id")
+
+	h := &OpenAIGatewayHandler{}
+	wrote := h.ensureForwardErrorResponse(c, false)
+
+	require.True(t, wrote)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+
+	var parsed map[string]any
+	err := json.Unmarshal(w.Body.Bytes(), &parsed)
+	require.NoError(t, err)
+	errorObj, ok := parsed["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "api_error", errorObj["type"])
+	assert.Equal(t, openAIHTTPPreviousResponseUnsupportedMessage(), errorObj["message"])
+}
+
 func TestOpenAIEnsureForwardErrorResponse_DoesNotOverrideWrittenResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
