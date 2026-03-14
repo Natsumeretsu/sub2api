@@ -4529,6 +4529,7 @@ type OpenAIRecordUsageInput struct {
 	User              *User
 	Account           *Account
 	Subscription      *UserSubscription
+	SessionHash       string
 	ClientRequestID   string
 	UserAgent         string // 请求的 User-Agent
 	IPAddress         string // 请求的客户端 IP 地址

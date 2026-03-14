@@ -694,6 +694,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				User:              apiKey.User,
 				Account:           account,
 				Subscription:      subscription,
+				SessionHash:       sessionHash,
 				ClientRequestID:   openAIResponsesClientRequestID(c),
 				UserAgent:         userAgent,
 				IPAddress:         clientIP,

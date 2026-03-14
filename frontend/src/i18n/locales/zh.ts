@@ -3529,7 +3529,10 @@ export default {
           input: '输入',
           cacheRead: '缓存读取',
           replay: '回放',
-          promptCacheKey: '缓存键来源'
+          promptCacheKey: '缓存键来源',
+          compactWindow: 'Compact 窗口',
+          compactBefore: 'Compact 前请求',
+          compactDelta: 'Compact 前后差异'
         }
       },
       alertEvents: {

@@ -26,6 +26,19 @@ type OpenAITurnTokenAttribution struct {
 	CacheReadTokens      int    `json:"cache_read_tokens,omitempty"`
 }
 
+type OpenAICompactWindowAttribution struct {
+	PreviousCompactRequestID           string `json:"previous_compact_request_id,omitempty"`
+	PreviousCompactOutcome             string `json:"previous_compact_outcome,omitempty"`
+	PreviousCompactAgeMs               int64  `json:"previous_compact_age_ms"`
+	PreviousCompactInputTokens         int    `json:"previous_compact_input_tokens"`
+	PreviousCompactCacheReadTokens     int    `json:"previous_compact_cache_read_tokens"`
+	PreviousCompactUpstreamInputTokens int    `json:"previous_compact_upstream_input_tokens"`
+	DeltaAvailable                     bool   `json:"delta_available"`
+	BillableInputDelta                 int    `json:"billable_input_delta"`
+	CacheReadDelta                     int    `json:"cache_read_delta"`
+	UpstreamInputDelta                 int    `json:"upstream_input_delta"`
+}
+
 func cloneOpenAITurnTokenAttribution(input *OpenAITurnTokenAttribution) *OpenAITurnTokenAttribution {
 	if input == nil {
 		return nil
@@ -132,6 +145,51 @@ func DecodeOpenAITurnTokenAttributionJSON(raw string) *OpenAITurnTokenAttributio
 	return &decoded
 }
 
+func BuildOpenAICompactWindowAttribution(
+	currentInputTokens int,
+	currentCacheReadTokens int,
+	currentAttr *OpenAITurnTokenAttribution,
+	previousCompactRequestID string,
+	previousCompactAgeMs int64,
+	previousCompactAttr *OpenAITurnTokenAttribution,
+) *OpenAICompactWindowAttribution {
+	if previousCompactAttr == nil || !previousCompactAttr.CompactRequest {
+		return nil
+	}
+	if currentAttr != nil && currentAttr.CompactRequest {
+		return nil
+	}
+
+	outcome := strings.TrimSpace(previousCompactAttr.CompactOutcome)
+	window := &OpenAICompactWindowAttribution{
+		PreviousCompactRequestID:           strings.TrimSpace(previousCompactRequestID),
+		PreviousCompactOutcome:             outcome,
+		PreviousCompactAgeMs:               previousCompactAgeMs,
+		PreviousCompactInputTokens:         previousCompactAttr.BillableInputTokens,
+		PreviousCompactCacheReadTokens:     previousCompactAttr.CacheReadTokens,
+		PreviousCompactUpstreamInputTokens: previousCompactAttr.UpstreamInputTokens,
+	}
+
+	if currentAttr != nil && strings.EqualFold(outcome, "succeeded") {
+		window.DeltaAvailable = true
+		window.BillableInputDelta = currentInputTokens - previousCompactAttr.BillableInputTokens
+		window.CacheReadDelta = currentCacheReadTokens - previousCompactAttr.CacheReadTokens
+		window.UpstreamInputDelta = currentAttr.UpstreamInputTokens - previousCompactAttr.UpstreamInputTokens
+	}
+
+	if window.PreviousCompactRequestID == "" &&
+		window.PreviousCompactOutcome == "" &&
+		window.PreviousCompactAgeMs == 0 &&
+		window.PreviousCompactInputTokens == 0 &&
+		window.PreviousCompactCacheReadTokens == 0 &&
+		window.PreviousCompactUpstreamInputTokens == 0 &&
+		!window.DeltaAvailable {
+		return nil
+	}
+
+	return window
+}
+
 func resolveOpenAITurnRequestID(ctx context.Context, result *OpenAIForwardResult) string {
 	if result != nil {
 		if requestID := strings.TrimSpace(result.RequestID); requestID != "" {
@@ -162,6 +220,9 @@ func emitOpenAITurnTokenAttributionLog(
 			CacheReadTokens:     input.Result.Usage.CacheReadInputTokens,
 		},
 	)
+	if attribution != nil && attribution.CompactRequest && strings.TrimSpace(attribution.CompactOutcome) == "" {
+		attribution.CompactOutcome = "succeeded"
+	}
 	requestID := resolveOpenAITurnRequestID(ctx, input.Result)
 
 	fields := []zap.Field{
@@ -183,6 +244,9 @@ func emitOpenAITurnTokenAttributionLog(
 	}
 	if input.APIKey.GroupID != nil && *input.APIKey.GroupID > 0 {
 		fields = append(fields, zap.Int64("group_id", *input.APIKey.GroupID))
+	}
+	if sessionHash := strings.TrimSpace(input.SessionHash); sessionHash != "" {
+		fields = append(fields, zap.String("session_hash", sessionHash))
 	}
 	if strings.TrimSpace(attribution.BridgeMode) != "" {
 		fields = append(fields, zap.String("bridge_mode", attribution.BridgeMode))

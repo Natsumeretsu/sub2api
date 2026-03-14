@@ -3356,7 +3356,10 @@ export default {
           input: 'Input',
           cacheRead: 'Cache read',
           replay: 'Replay',
-          promptCacheKey: 'Prompt cache key'
+          promptCacheKey: 'Prompt cache key',
+          compactWindow: 'Compact window',
+          compactBefore: 'Pre-compact request',
+          compactDelta: 'Compact delta'
         }
       },
       alertEvents: {

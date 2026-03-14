@@ -35,6 +35,50 @@ func TestDecodeOpenAITurnTokenAttributionJSON(t *testing.T) {
 	require.Equal(t, 456, decoded.CacheReadTokens)
 }
 
+func TestBuildOpenAICompactWindowAttribution(t *testing.T) {
+	currentAttr := &OpenAITurnTokenAttribution{
+		UpstreamInputTokens:  8321,
+		BillableInputTokens:  2817,
+		CacheReadTokens:      5504,
+		PromptCacheKeyUsed:   true,
+		PromptCacheKeySource: "payload",
+	}
+	previousCompactAttr := &OpenAITurnTokenAttribution{
+		CompactRequest:      true,
+		CompactOutcome:      "succeeded",
+		UpstreamInputTokens: 9100,
+		BillableInputTokens: 3200,
+		CacheReadTokens:     5900,
+	}
+
+	window := BuildOpenAICompactWindowAttribution(
+		2817,
+		5504,
+		currentAttr,
+		"req-compact-1",
+		4200,
+		previousCompactAttr,
+	)
+
+	require.NotNil(t, window)
+	require.Equal(t, "req-compact-1", window.PreviousCompactRequestID)
+	require.Equal(t, "succeeded", window.PreviousCompactOutcome)
+	require.EqualValues(t, 4200, window.PreviousCompactAgeMs)
+	require.True(t, window.DeltaAvailable)
+	require.Equal(t, -383, window.BillableInputDelta)
+	require.Equal(t, -396, window.CacheReadDelta)
+	require.Equal(t, -779, window.UpstreamInputDelta)
+}
+
+func TestBuildOpenAICompactWindowAttribution_IgnoresCurrentCompactRequest(t *testing.T) {
+	currentAttr := &OpenAITurnTokenAttribution{CompactRequest: true}
+	previousCompactAttr := &OpenAITurnTokenAttribution{CompactRequest: true, CompactOutcome: "succeeded"}
+
+	window := BuildOpenAICompactWindowAttribution(0, 0, currentAttr, "req-compact-2", 1000, previousCompactAttr)
+
+	require.Nil(t, window)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_EmitsTurnTokenAttributionLog(t *testing.T) {
 	sink, restore := captureStructuredLog(t)
 	defer restore()
@@ -60,6 +104,7 @@ func TestOpenAIGatewayServiceRecordUsage_EmitsTurnTokenAttributionLog(t *testing
 				ReplayInputItems:   3,
 				ReplayInputBytes:   512,
 				ReplayInputApplied: true,
+				CompactRequest:     true,
 			},
 			Duration: time.Second,
 		},
@@ -73,6 +118,7 @@ func TestOpenAIGatewayServiceRecordUsage_EmitsTurnTokenAttributionLog(t *testing
 		},
 		User:            &User{ID: 20021},
 		Account:         &Account{ID: 30021},
+		SessionHash:     "sess-hash-21",
 		ClientRequestID: "creq-turn-attr-1",
 	})
 
@@ -84,6 +130,8 @@ func TestOpenAIGatewayServiceRecordUsage_EmitsTurnTokenAttributionLog(t *testing
 	require.True(t, sink.ContainsFieldValue("replay_input_bytes", "512"))
 	require.True(t, sink.ContainsFieldValue("cache_read_tokens", "120"))
 	require.True(t, sink.ContainsFieldValue("billable_input_tokens", "180"))
+	require.True(t, sink.ContainsFieldValue("session_hash", "sess-hash-21"))
+	require.True(t, sink.ContainsFieldValue("compact_outcome", "succeeded"))
 }
 
 func TestOpenAIGatewayServiceRecordUsage_FallsBackToContextRequestID(t *testing.T) {

@@ -106,7 +106,14 @@ WITH combined AS (
     ul.input_tokens AS input_tokens,
     ul.cache_read_tokens AS cache_read_tokens,
     ul.openai_ws_mode AS openai_ws_mode,
-    COALESCE(attr.extra, '{}'::jsonb)::text AS attribution_json
+    COALESCE(attr.extra, '{}'::jsonb)::text AS attribution_json,
+    compact_attr.request_id AS compact_request_id,
+    COALESCE(compact_attr.extra, '{}'::jsonb)::text AS compact_attribution_json,
+    CASE
+      WHEN compact_attr.created_at IS NOT NULL
+      THEN GREATEST((EXTRACT(EPOCH FROM (ul.created_at - compact_attr.created_at)) * 1000)::BIGINT, 0)
+      ELSE NULL::BIGINT
+    END AS compact_age_ms
   FROM usage_logs ul
   LEFT JOIN groups g ON g.id = ul.group_id
   LEFT JOIN accounts a ON a.id = ul.account_id
@@ -118,6 +125,18 @@ WITH combined AS (
     ORDER BY l.created_at DESC, l.id DESC
     LIMIT 1
   ) attr ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT l.request_id, l.created_at, l.extra
+    FROM ops_system_logs l
+    WHERE l.message = 'openai.turn_token_attribution'
+      AND COALESCE(l.extra->>'session_hash', '') <> ''
+      AND COALESCE(l.extra->>'session_hash', '') = COALESCE(attr.extra->>'session_hash', '')
+      AND COALESCE((l.extra->>'compact_request')::BOOLEAN, false) = true
+      AND COALESCE(l.request_id, '') <> COALESCE(ul.request_id, '')
+      AND l.created_at <= ul.created_at
+    ORDER BY l.created_at DESC, l.id DESC
+    LIMIT 1
+  ) compact_attr ON TRUE
   WHERE ul.created_at >= $1 AND ul.created_at < $2
 
   UNION ALL
@@ -142,7 +161,10 @@ WITH combined AS (
     NULL::INT AS input_tokens,
     NULL::INT AS cache_read_tokens,
     NULL::BOOLEAN AS openai_ws_mode,
-    '{}'::jsonb::text AS attribution_json
+    '{}'::jsonb::text AS attribution_json,
+    NULL::TEXT AS compact_request_id,
+    '{}'::jsonb::text AS compact_attribution_json,
+    NULL::BIGINT AS compact_age_ms
   FROM ops_error_logs o
   LEFT JOIN groups g ON g.id = o.group_id
   LEFT JOIN accounts a ON a.id = o.account_id
@@ -195,7 +217,10 @@ SELECT
   input_tokens,
   cache_read_tokens,
   openai_ws_mode,
-  attribution_json
+  attribution_json,
+  compact_request_id,
+  compact_attribution_json,
+  compact_age_ms
 FROM combined
 %s
 %s
@@ -246,11 +271,14 @@ LIMIT $%d OFFSET $%d
 			accountID sql.NullInt64
 			groupID   sql.NullInt64
 
-			stream          bool
-			inputTokens     sql.NullInt64
-			cacheReadTokens sql.NullInt64
-			openAIWSMode    sql.NullBool
-			attributionJSON sql.NullString
+			stream                 bool
+			inputTokens            sql.NullInt64
+			cacheReadTokens        sql.NullInt64
+			openAIWSMode           sql.NullBool
+			attributionJSON        sql.NullString
+			compactRequestID       sql.NullString
+			compactAttributionJSON sql.NullString
+			compactAgeMs           sql.NullInt64
 		)
 
 		if err := rows.Scan(
@@ -274,11 +302,23 @@ LIMIT $%d OFFSET $%d
 			&cacheReadTokens,
 			&openAIWSMode,
 			&attributionJSON,
+			&compactRequestID,
+			&compactAttributionJSON,
+			&compactAgeMs,
 		); err != nil {
 			return nil, 0, err
 		}
 
 		attribution := service.DecodeOpenAITurnTokenAttributionJSON(strings.TrimSpace(attributionJSON.String))
+		compactAttribution := service.DecodeOpenAITurnTokenAttributionJSON(strings.TrimSpace(compactAttributionJSON.String))
+		currentInputValue := 0
+		if inputTokens.Valid {
+			currentInputValue = int(inputTokens.Int64)
+		}
+		currentCacheReadValue := 0
+		if cacheReadTokens.Valid {
+			currentCacheReadValue = int(cacheReadTokens.Int64)
+		}
 		item := &service.OpsRequestDetail{
 			Kind:      service.OpsRequestKind(kind),
 			CreatedAt: createdAt,
@@ -309,6 +349,14 @@ LIMIT $%d OFFSET $%d
 				return &v
 			}(),
 			TokenAttribution: attribution,
+			CompactWindow: service.BuildOpenAICompactWindowAttribution(
+				currentInputValue,
+				currentCacheReadValue,
+				attribution,
+				strings.TrimSpace(compactRequestID.String),
+				compactAgeMs.Int64,
+				compactAttribution,
+			),
 		}
 
 		if item.Platform == "" {

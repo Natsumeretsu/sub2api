@@ -164,8 +164,22 @@ function hasAttribution(row: OpsRequestDetail): boolean {
     typeof row.cache_read_tokens === 'number' ||
     row.openai_ws_mode === true ||
     row.openai_ws_mode === false ||
-    !!row.token_attribution
+    !!row.token_attribution ||
+    !!row.compact_window
   )
+}
+
+function formatSignedInt(value: number | null | undefined): string {
+  if (typeof value !== 'number') return '-'
+  if (value > 0) return `+${value.toLocaleString()}`
+  return value.toLocaleString()
+}
+
+function formatCompactAge(ms: number | null | undefined): string {
+  if (typeof ms !== 'number' || ms < 0) return '-'
+  if (ms < 1000) return `${ms} ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
+  return `${(ms / 60_000).toFixed(1)} min`
 }
 </script>
 
@@ -304,6 +318,31 @@ function hasAttribution(row: OpsRequestDetail): boolean {
                       </div>
                       <div v-if="row.token_attribution?.prompt_cache_key_source" class="text-gray-500 dark:text-gray-400">
                         {{ t('admin.ops.requestDetails.attribution.promptCacheKey') }} {{ row.token_attribution.prompt_cache_key_source }}
+                      </div>
+                      <div v-if="row.compact_window" class="rounded-lg border border-amber-200 bg-amber-50/70 px-2 py-1 text-[11px] text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/10 dark:text-amber-200">
+                        <div class="font-semibold">
+                          {{ t('admin.ops.requestDetails.attribution.compactWindow') }}
+                          <span class="mx-1">·</span>
+                          {{ row.compact_window.previous_compact_outcome || '-' }}
+                          <span class="mx-1">·</span>
+                          {{ formatCompactAge(row.compact_window.previous_compact_age_ms) }}
+                        </div>
+                        <div>
+                          {{ t('admin.ops.requestDetails.attribution.compactBefore') }}
+                          {{ formatInt(row.compact_window.previous_compact_input_tokens) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatInt(row.compact_window.previous_compact_cache_read_tokens) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatInt(row.compact_window.previous_compact_upstream_input_tokens) }}
+                        </div>
+                        <div v-if="row.compact_window.delta_available">
+                          {{ t('admin.ops.requestDetails.attribution.compactDelta') }}
+                          {{ formatSignedInt(row.compact_window.billable_input_delta) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatSignedInt(row.compact_window.cache_read_delta) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatSignedInt(row.compact_window.upstream_input_delta) }}
+                        </div>
                       </div>
                     </div>
                     <span v-else class="text-xs text-gray-400">-</span>

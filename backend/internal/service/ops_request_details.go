@@ -37,11 +37,12 @@ type OpsRequestDetail struct {
 	AccountID *int64 `json:"account_id,omitempty"`
 	GroupID   *int64 `json:"group_id,omitempty"`
 
-	Stream           bool                        `json:"stream"`
-	InputTokens      *int                        `json:"input_tokens,omitempty"`
-	CacheReadTokens  *int                        `json:"cache_read_tokens,omitempty"`
-	OpenAIWSMode     *bool                       `json:"openai_ws_mode,omitempty"`
-	TokenAttribution *OpenAITurnTokenAttribution `json:"token_attribution,omitempty"`
+	Stream           bool                            `json:"stream"`
+	InputTokens      *int                            `json:"input_tokens,omitempty"`
+	CacheReadTokens  *int                            `json:"cache_read_tokens,omitempty"`
+	OpenAIWSMode     *bool                           `json:"openai_ws_mode,omitempty"`
+	TokenAttribution *OpenAITurnTokenAttribution     `json:"token_attribution,omitempty"`
+	CompactWindow    *OpenAICompactWindowAttribution `json:"compact_window,omitempty"`
 }
 
 type OpsRequestDetailFilter struct {

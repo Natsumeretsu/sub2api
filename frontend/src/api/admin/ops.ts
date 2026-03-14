@@ -281,6 +281,19 @@ export interface OpsRequestTokenAttribution {
   cache_read_tokens?: number
 }
 
+export interface OpsCompactWindowAttribution {
+  previous_compact_request_id?: string
+  previous_compact_outcome?: string
+  previous_compact_age_ms: number
+  previous_compact_input_tokens: number
+  previous_compact_cache_read_tokens: number
+  previous_compact_upstream_input_tokens: number
+  delta_available: boolean
+  billable_input_delta: number
+  cache_read_delta: number
+  upstream_input_delta: number
+}
+
 export interface OpsRequestDetail {
   kind: OpsRequestKind
   created_at: string
@@ -306,6 +319,7 @@ export interface OpsRequestDetail {
   cache_read_tokens?: number | null
   openai_ws_mode?: boolean | null
   token_attribution?: OpsRequestTokenAttribution | null
+  compact_window?: OpsCompactWindowAttribution | null
 }
 
 export interface OpsRequestDetailsParams {
