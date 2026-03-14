@@ -236,6 +236,9 @@ type OpenAIForwardResult struct {
 	Stream          bool
 	OpenAIWSMode    bool
 	ResponseHeaders http.Header
+	ReplayInput     []json.RawMessage
+	ReplayInputSet  bool
+	PromptCacheKey  string
 	Duration        time.Duration
 	FirstTokenMs    *int
 }
@@ -340,12 +343,13 @@ type OpenAIGatewayService struct {
 	openaiWSPassthroughDialer     openAIWSClientDialer
 	openaiAccountStats            *openAIAccountRuntimeStats
 
-	openaiWSFallbackUntil    sync.Map // key: int64(accountID), value: time.Time
-	openaiWSRetryMetrics     openAIWSRetryMetrics
-	openaiCompactCapability  sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
-	openaiHTTPPrevCapability sync.Map // key: int64(accountID), value: openAIHTTPPreviousResponseCapabilityObservation
-	responseHeaderFilter     *responseheaders.CompiledHeaderFilter
-	codexSnapshotThrottle    *accountWriteThrottle
+	openaiWSFallbackUntil       sync.Map // key: int64(accountID), value: time.Time
+	openaiWSRetryMetrics        openAIWSRetryMetrics
+	openaiWSTransportCapability sync.Map // key: int64(accountID), value: openAIWSTransportCapabilityObservation
+	openaiCompactCapability     sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
+	openaiHTTPPrevCapability    sync.Map // key: int64(accountID), value: openAIHTTPPreviousResponseCapabilityObservation
+	responseHeaderFilter        *responseheaders.CompiledHeaderFilter
+	codexSnapshotThrottle       *accountWriteThrottle
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
@@ -1825,7 +1829,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	originalModel := reqModel
 
 	isCodexCLI := openai.IsCodexOfficialClientByHeaders(c.GetHeader("User-Agent"), c.GetHeader("originator")) || (s.cfg != nil && s.cfg.Gateway.ForceCodexCLI)
-	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
+	wsDecision := s.resolveOpenAIWSProtocolDecision(ctx, account, reqModel)
 	clientTransport := GetOpenAIClientTransport(c)
 	// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, clientTransport)
@@ -2656,9 +2660,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	req.Header.Del("x-goog-api-key")
 	req.Header.Set("authorization", "Bearer "+token)
 
+	promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+
 	// OAuth 透传到 ChatGPT internal API 时补齐必要头。
 	if account.Type == AccountTypeOAuth {
-		promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
 		req.Host = "chatgpt.com"
 		if chatgptAccountID := account.GetChatGPTAccountID(); chatgptAccountID != "" {
 			req.Header.Set("chatgpt-account-id", chatgptAccountID)
@@ -2687,6 +2692,15 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 			if req.Header.Get("session_id") == "" {
 				req.Header.Set("session_id", promptCacheKey)
 			}
+		}
+	}
+
+	if promptCacheKey != "" {
+		if req.Header.Get("conversation_id") == "" {
+			req.Header.Set("conversation_id", promptCacheKey)
+		}
+		if req.Header.Get("session_id") == "" {
+			req.Header.Set("session_id", promptCacheKey)
 		}
 	}
 

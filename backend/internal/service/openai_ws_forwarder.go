@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -226,6 +227,226 @@ func openAIWSIngressTurnKey(ctx context.Context, sessionHash string, turn int, p
 		return "derived:" + derived
 	}
 	return "generated:" + clientRequestID + "#turn=" + strconv.Itoa(turn) + ":" + derived
+}
+
+func buildOpenAIWSHTTPBridgeRequestBody(payload []byte) ([]byte, error) {
+	normalized := bytes.TrimSpace(payload)
+	if len(normalized) == 0 {
+		return nil, errors.New("empty websocket bridge payload")
+	}
+	if !gjson.ValidBytes(normalized) {
+		return nil, errors.New("invalid websocket bridge payload")
+	}
+	if gjson.GetBytes(normalized, "type").Exists() {
+		next, err := sjson.DeleteBytes(normalized, "type")
+		if err != nil {
+			return nil, fmt.Errorf("delete type: %w", err)
+		}
+		normalized = next
+	}
+	if stream := gjson.GetBytes(normalized, "stream"); !stream.Exists() || stream.Type != gjson.True {
+		next, err := sjson.SetBytes(normalized, "stream", true)
+		if err != nil {
+			return nil, fmt.Errorf("set stream=true: %w", err)
+		}
+		normalized = next
+	}
+	return normalized, nil
+}
+
+func buildOpenAIWSBridgeFailedEvent(message string) []byte {
+	message = sanitizeUpstreamErrorMessage(strings.TrimSpace(message))
+	if message == "" {
+		message = "Upstream bridge request failed"
+	}
+	payload, err := json.Marshal(map[string]any{
+		"type": "response.failed",
+		"error": map[string]any{
+			"message": message,
+		},
+	})
+	if err != nil {
+		return []byte(`{"type":"response.failed","error":{"message":"Upstream bridge request failed"}}`)
+	}
+	return payload
+}
+
+func (s *OpenAIGatewayService) relayOpenAIWSHTTPBridgeStream(
+	ctx context.Context,
+	resp *http.Response,
+	account *Account,
+	requestPayload []byte,
+	originalModel string,
+	turnStart time.Time,
+	writeClientMessage func([]byte) error,
+) (*OpenAIForwardResult, error) {
+	if resp == nil {
+		return nil, errors.New("upstream http bridge response is nil")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	usage := OpenAIUsage{}
+	var firstTokenMs *int
+	responseID := ""
+	wroteDownstream := false
+	reqStream := openAIWSPayloadBoolFromRaw(requestPayload, "stream", true)
+	replayInput := []json.RawMessage(nil)
+	replayInputSet := false
+	responsePromptCacheKey := ""
+
+	emitFailure := func(message string) (*OpenAIForwardResult, error) {
+		failureEvent := buildOpenAIWSBridgeFailedEvent(message)
+		if err := writeClientMessage(failureEvent); err != nil {
+			return nil, wrapOpenAIWSIngressTurnError(
+				"write_client",
+				fmt.Errorf("write websocket bridge failure event: %w", err),
+				wroteDownstream,
+			)
+		}
+		wroteDownstream = true
+		return &OpenAIForwardResult{
+			RequestID:       responseID,
+			Usage:           usage,
+			Model:           originalModel,
+			ServiceTier:     extractOpenAIServiceTierFromBody(requestPayload),
+			ReasoningEffort: extractOpenAIReasoningEffortFromBody(requestPayload, originalModel),
+			Stream:          reqStream,
+			OpenAIWSMode:    true,
+			ResponseHeaders: resp.Header,
+			ReplayInput:     cloneOpenAIWSRawMessages(replayInput),
+			ReplayInputSet:  replayInputSet,
+			PromptCacheKey:  responsePromptCacheKey,
+			Duration:        time.Since(turnStart),
+			FirstTokenMs:    firstTokenMs,
+		}, nil
+	}
+
+	if resp.StatusCode >= 400 {
+		body, _ := readUpstreamResponseBodyLimited(resp.Body, 2<<20)
+		message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(body)))
+		if message == "" {
+			message = fmt.Sprintf("Upstream bridge request failed with status %d", resp.StatusCode)
+		}
+		return emitFailure(message)
+	}
+
+	mappedModel := ""
+	needModelReplace := false
+	var mappedModelBytes []byte
+	if account != nil && originalModel != "" {
+		mappedModel = account.GetMappedModel(originalModel)
+		if normalizedModel := normalizeCodexModel(mappedModel); normalizedModel != "" {
+			mappedModel = normalizedModel
+		}
+		needModelReplace = mappedModel != "" && mappedModel != originalModel
+		if needModelReplace {
+			mappedModelBytes = []byte(mappedModel)
+		}
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	maxLineSize := defaultMaxLineSize
+	if s != nil && s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+		maxLineSize = s.cfg.Gateway.MaxLineSize
+	}
+	scanBuf := getSSEScannerBuf64K()
+	scanner.Buffer(scanBuf[:0], maxLineSize)
+	defer putSSEScannerBuf64K(scanBuf)
+
+	sawTerminal := false
+	sawDone := false
+	terminalMessage := ""
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		data, ok := extractOpenAISSEDataLine(line)
+		if !ok {
+			continue
+		}
+		trimmedData := strings.TrimSpace(data)
+		if trimmedData == "" {
+			continue
+		}
+		if trimmedData == "[DONE]" {
+			sawDone = true
+			continue
+		}
+		if !gjson.Valid(trimmedData) {
+			terminalMessage = "Upstream bridge stream returned invalid JSON frame"
+			continue
+		}
+
+		eventPayload := []byte(trimmedData)
+		eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(eventPayload)
+		if responseID == "" && strings.TrimSpace(eventResponseID) != "" {
+			responseID = strings.TrimSpace(eventResponseID)
+		}
+		if firstTokenMs == nil && isOpenAIWSTokenEvent(eventType) {
+			ms := int(time.Since(turnStart).Milliseconds())
+			firstTokenMs = &ms
+		}
+		if openAIWSEventShouldParseUsage(eventType) {
+			parseOpenAIWSResponseUsageFromCompletedEvent(eventPayload, &usage)
+			if completedReplayInput, completedReplayInputSet, completedPromptCacheKey, extractErr := extractOpenAIWSReplayInputFromCompletedEvent(eventPayload); extractErr == nil {
+				replayInput = completedReplayInput
+				replayInputSet = completedReplayInputSet
+				if completedPromptCacheKey != "" {
+					responsePromptCacheKey = completedPromptCacheKey
+				}
+			}
+		}
+		if needModelReplace && len(mappedModelBytes) > 0 && openAIWSEventMayContainModel(eventType) && bytes.Contains(eventPayload, mappedModelBytes) {
+			eventPayload = replaceOpenAIWSMessageModel(eventPayload, mappedModel, originalModel)
+		}
+		if openAIWSEventMayContainToolCalls(eventType) && openAIWSMessageLikelyContainsToolCalls(eventPayload) {
+			if corrected, changed := s.toolCorrector.CorrectToolCallsInSSEBytes(eventPayload); changed {
+				eventPayload = corrected
+			}
+		}
+		if err := writeClientMessage(eventPayload); err != nil {
+			return nil, wrapOpenAIWSIngressTurnError(
+				"write_client",
+				fmt.Errorf("write websocket bridge event: %w", err),
+				wroteDownstream,
+			)
+		}
+		wroteDownstream = true
+		if isOpenAIWSTerminalEvent(eventType) {
+			sawTerminal = true
+			return &OpenAIForwardResult{
+				RequestID:       responseID,
+				Usage:           usage,
+				Model:           originalModel,
+				ServiceTier:     extractOpenAIServiceTierFromBody(requestPayload),
+				ReasoningEffort: extractOpenAIReasoningEffortFromBody(requestPayload, originalModel),
+				Stream:          reqStream,
+				OpenAIWSMode:    true,
+				ResponseHeaders: resp.Header,
+				ReplayInput:     cloneOpenAIWSRawMessages(replayInput),
+				ReplayInputSet:  replayInputSet,
+				PromptCacheKey:  responsePromptCacheKey,
+				Duration:        time.Since(turnStart),
+				FirstTokenMs:    firstTokenMs,
+			}, nil
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		terminalMessage = sanitizeUpstreamErrorMessage(scanErr.Error())
+		if terminalMessage == "" {
+			terminalMessage = "Upstream bridge stream disconnected before completion"
+		}
+	}
+	if !sawTerminal {
+		if terminalMessage == "" {
+			if sawDone {
+				terminalMessage = "Upstream bridge stream ended without terminal response payload"
+			} else {
+				terminalMessage = "Upstream bridge stream disconnected before terminal response event"
+			}
+		}
+		return emitFailure(terminalMessage)
+	}
+	return nil, nil
 }
 
 func openAIWSIngressTurnBeginError(beginErr error) error {
@@ -1679,6 +1900,160 @@ func setOpenAIWSPayloadInputSequence(
 	return sjson.SetRawBytes(payload, "input", inputRaw)
 }
 
+func ensureOpenAIWSPayloadPromptCacheKey(payload []byte, promptCacheKey string) ([]byte, bool, error) {
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if promptCacheKey == "" || len(payload) == 0 {
+		return payload, false, nil
+	}
+	if strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()) != "" {
+		return payload, false, nil
+	}
+	next, err := sjson.SetBytes(payload, "prompt_cache_key", promptCacheKey)
+	if err != nil {
+		return nil, false, err
+	}
+	return next, true, nil
+}
+
+func appendOpenAIWSReplayInputItems(
+	base []json.RawMessage,
+	baseExists bool,
+	extra []json.RawMessage,
+	extraExists bool,
+) ([]json.RawMessage, bool) {
+	if !extraExists || len(extra) == 0 {
+		return cloneOpenAIWSRawMessages(base), baseExists
+	}
+	if !baseExists || len(base) == 0 {
+		return cloneOpenAIWSRawMessages(extra), true
+	}
+	merged := make([]json.RawMessage, 0, len(base)+len(extra))
+	merged = append(merged, cloneOpenAIWSRawMessages(base)...)
+	merged = append(merged, cloneOpenAIWSRawMessages(extra)...)
+	return merged, true
+}
+
+func extractOpenAIWSReplayInputFromCompletedEvent(payload []byte) ([]json.RawMessage, bool, string, error) {
+	if len(payload) == 0 {
+		return nil, false, "", nil
+	}
+	response := gjson.GetBytes(payload, "response")
+	if !response.Exists() {
+		return nil, false, "", nil
+	}
+	output := response.Get("output")
+	if !output.Exists() || !output.IsArray() {
+		return nil, false, strings.TrimSpace(response.Get("prompt_cache_key").String()), nil
+	}
+	rawItems := output.Array()
+	items := make([]json.RawMessage, 0, len(rawItems))
+	for _, rawItem := range rawItems {
+		if !rawItem.Exists() {
+			continue
+		}
+		itemType := strings.TrimSpace(rawItem.Get("type").String())
+		switch itemType {
+		case "message":
+			role := strings.TrimSpace(rawItem.Get("role").String())
+			if role == "" {
+				role = "assistant"
+			}
+			content := rawItem.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				continue
+			}
+			sanitizedContent := make([]map[string]any, 0, len(content.Array()))
+			for _, rawPart := range content.Array() {
+				partType := strings.TrimSpace(rawPart.Get("type").String())
+				if partType == "" {
+					continue
+				}
+				switch partType {
+				case "output_text":
+					sanitizedContent = append(sanitizedContent, map[string]any{
+						"type": "output_text",
+						"text": rawPart.Get("text").String(),
+					})
+				case "refusal":
+					refusalText := strings.TrimSpace(rawPart.Get("refusal").String())
+					if refusalText == "" {
+						refusalText = strings.TrimSpace(rawPart.Get("text").String())
+					}
+					sanitizedContent = append(sanitizedContent, map[string]any{
+						"type":    "refusal",
+						"refusal": refusalText,
+					})
+				default:
+					var passthrough map[string]any
+					if err := json.Unmarshal([]byte(rawPart.Raw), &passthrough); err != nil {
+						return nil, false, "", err
+					}
+					delete(passthrough, "annotations")
+					delete(passthrough, "logprobs")
+					sanitizedContent = append(sanitizedContent, passthrough)
+				}
+			}
+			if len(sanitizedContent) == 0 {
+				continue
+			}
+			itemBytes, err := json.Marshal(map[string]any{
+				"type":    "message",
+				"role":    role,
+				"content": sanitizedContent,
+			})
+			if err != nil {
+				return nil, false, "", err
+			}
+			items = append(items, itemBytes)
+		case "function_call", "tool_call":
+			var passthrough map[string]any
+			if err := json.Unmarshal([]byte(rawItem.Raw), &passthrough); err != nil {
+				return nil, false, "", err
+			}
+			delete(passthrough, "id")
+			delete(passthrough, "status")
+			delete(passthrough, "phase")
+			itemBytes, err := json.Marshal(passthrough)
+			if err != nil {
+				return nil, false, "", err
+			}
+			items = append(items, itemBytes)
+		}
+	}
+	return items, len(items) > 0, strings.TrimSpace(response.Get("prompt_cache_key").String()), nil
+}
+
+func prepareOpenAIWSHTTPBridgePayload(
+	payload []byte,
+	replayInput []json.RawMessage,
+	replayInputExists bool,
+	promptCacheKey string,
+	preservePreviousResponseID bool,
+) ([]byte, bool, bool, error) {
+	updated := payload
+	promptChanged := false
+	if promptCacheKey != "" {
+		var err error
+		updated, promptChanged, err = ensureOpenAIWSPayloadPromptCacheKey(updated, promptCacheKey)
+		if err != nil {
+			return nil, false, false, err
+		}
+	}
+	if preservePreviousResponseID || strings.TrimSpace(gjson.GetBytes(updated, "previous_response_id").String()) == "" {
+		return updated, promptChanged, false, nil
+	}
+	var err error
+	updated, err = sjson.DeleteBytes(updated, "previous_response_id")
+	if err != nil {
+		return nil, false, false, err
+	}
+	updated, err = setOpenAIWSPayloadInputSequence(updated, replayInput, replayInputExists)
+	if err != nil {
+		return nil, false, false, err
+	}
+	return updated, promptChanged, true, nil
+}
+
 func validateOpenAIWSFunctionCallOutputPayload(payload []byte) error {
 	if len(payload) == 0 || !gjson.GetBytes(payload, `input.#(type=="function_call_output")`).Exists() {
 		return nil
@@ -2562,7 +2937,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return errors.New("token is empty")
 	}
 
-	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
+	requestedModel := strings.TrimSpace(gjson.GetBytes(firstClientMessage, "model").String())
+	wsDecision := s.resolveOpenAIWSProtocolDecision(ctx, account, requestedModel)
+	useHTTPBridge := wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2
 	modeRouterV2Enabled := s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
 	ingressMode := OpenAIWSIngressModeCtxPool
 	if modeRouterV2Enabled {
@@ -2576,19 +2953,18 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		switch ingressMode {
 		case OpenAIWSIngressModePassthrough:
-			if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
-				return fmt.Errorf("websocket ingress requires ws_v2 transport, got=%s", wsDecision.Transport)
+			if !useHTTPBridge {
+				return s.proxyResponsesWebSocketV2Passthrough(
+					ctx,
+					c,
+					clientConn,
+					account,
+					token,
+					firstClientMessage,
+					hooks,
+					wsDecision,
+				)
 			}
-			return s.proxyResponsesWebSocketV2Passthrough(
-				ctx,
-				c,
-				clientConn,
-				account,
-				token,
-				firstClientMessage,
-				hooks,
-				wsDecision,
-			)
 		case OpenAIWSIngressModeCtxPool, OpenAIWSIngressModeShared, OpenAIWSIngressModeDedicated:
 			// continue
 		default:
@@ -2599,22 +2975,23 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			)
 		}
 	}
-	if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
-		return fmt.Errorf("websocket ingress requires ws_v2 transport, got=%s", wsDecision.Transport)
-	}
 	dedicatedMode := modeRouterV2Enabled && ingressMode == OpenAIWSIngressModeDedicated
+	debugEnabled := isOpenAIWSModeDebugEnabled()
 
-	wsURL, err := s.buildOpenAIResponsesWSURL(account)
-	if err != nil {
-		return fmt.Errorf("build ws url: %w", err)
-	}
+	wsURL := ""
 	wsHost := "-"
 	wsPath := "-"
-	if parsedURL, parseErr := url.Parse(wsURL); parseErr == nil && parsedURL != nil {
-		wsHost = normalizeOpenAIWSLogValue(parsedURL.Host)
-		wsPath = normalizeOpenAIWSLogValue(parsedURL.Path)
+	if !useHTTPBridge {
+		wsBuiltURL, wsBuildErr := s.buildOpenAIResponsesWSURL(account)
+		if wsBuildErr != nil {
+			return fmt.Errorf("build ws url: %w", wsBuildErr)
+		}
+		wsURL = wsBuiltURL
+		if parsedURL, parseErr := url.Parse(wsURL); parseErr == nil && parsedURL != nil {
+			wsHost = normalizeOpenAIWSLogValue(parsedURL.Host)
+			wsPath = normalizeOpenAIWSLogValue(parsedURL.Path)
+		}
 	}
-	debugEnabled := isOpenAIWSModeDebugEnabled()
 
 	type openAIWSClientPayload struct {
 		payloadRaw         []byte
@@ -2738,6 +3115,27 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return err
 	}
 
+	writeClientMessage := func(message []byte) error {
+		writeCtx, cancel := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
+		defer cancel()
+		return clientConn.Write(writeCtx, coderws.MessageText, message)
+	}
+
+	readClientMessage := func() ([]byte, error) {
+		msgType, payload, readErr := clientConn.Read(ctx)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
+			return nil, NewOpenAIWSClientCloseError(
+				coderws.StatusPolicyViolation,
+				fmt.Sprintf("unsupported websocket client message type: %s", msgType.String()),
+				nil,
+			)
+		}
+		return payload, nil
+	}
+
 	turnState := strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
 	stateStore := s.getOpenAIWSStateStore()
 	groupID := getOpenAIGroupIDFromContext(c)
@@ -2749,7 +3147,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	preferredConnID := ""
-	if stateStore != nil && firstPayload.previousResponseID != "" {
+	if !useHTTPBridge && stateStore != nil && firstPayload.previousResponseID != "" {
 		if connID, ok := stateStore.GetResponseConn(firstPayload.previousResponseID); ok {
 			preferredConnID = connID
 		}
@@ -2757,29 +3155,33 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	storeDisabled := s.isOpenAIWSStoreDisabledInRequestRaw(firstPayload.payloadRaw, account)
 	storeDisabledConnMode := s.openAIWSStoreDisabledConnMode()
-	if stateStore != nil && storeDisabled && firstPayload.previousResponseID == "" && sessionHash != "" {
+	if !useHTTPBridge && stateStore != nil && storeDisabled && firstPayload.previousResponseID == "" && sessionHash != "" {
 		if connID, ok := stateStore.GetSessionConn(groupID, sessionHash); ok {
 			preferredConnID = connID
 		}
 	}
 
 	isCodexCLI := openai.IsCodexOfficialClientByHeaders(c.GetHeader("User-Agent"), c.GetHeader("originator")) || (s.cfg != nil && s.cfg.Gateway.ForceCodexCLI)
-	wsHeaders, _ := s.buildOpenAIWSHeaders(c, account, token, wsDecision, isCodexCLI, turnState, strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)), firstPayload.promptCacheKey)
-	baseAcquireReq := openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   wsURL,
-		Headers: wsHeaders,
-		ProxyURL: func() string {
-			if account.ProxyID != nil && account.Proxy != nil {
-				return account.Proxy.URL()
-			}
-			return ""
-		}(),
-		ForceNewConn: false,
-	}
-	pool := s.getOpenAIWSConnPool()
-	if pool == nil {
-		return errors.New("openai ws conn pool is nil")
+	baseAcquireReq := openAIWSAcquireRequest{}
+	var pool *openAIWSConnPool
+	if !useHTTPBridge {
+		wsHeaders, _ := s.buildOpenAIWSHeaders(c, account, token, wsDecision, isCodexCLI, turnState, strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)), firstPayload.promptCacheKey)
+		baseAcquireReq = openAIWSAcquireRequest{
+			Account: account,
+			WSURL:   wsURL,
+			Headers: wsHeaders,
+			ProxyURL: func() string {
+				if account.ProxyID != nil && account.Proxy != nil {
+					return account.Proxy.URL()
+				}
+				return ""
+			}(),
+			ForceNewConn: false,
+		}
+		pool = s.getOpenAIWSConnPool()
+		if pool == nil {
+			return errors.New("openai ws conn pool is nil")
+		}
 	}
 
 	logOpenAIWSModeInfo(
@@ -2806,6 +3208,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			sessionHash != "",
 			firstPayload.previousResponseID != "",
 			storeDisabled,
+		)
+	}
+	if useHTTPBridge {
+		logOpenAIWSModeInfo(
+			"ingress_ws_http_bridge_enabled account_id=%d account_type=%s transport=%s ws_mode=%s has_previous_response_id=%v has_session_hash=%v",
+			account.ID,
+			account.Type,
+			normalizeOpenAIWSLogValue(string(wsDecision.Transport)),
+			normalizeOpenAIWSLogValue(ingressMode),
+			firstPayload.previousResponseID != "",
+			sessionHash != "",
 		)
 	}
 	if firstPayload.previousResponseID != "" {
@@ -2909,27 +3322,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return lease, nil
 	}
 
-	writeClientMessage := func(message []byte) error {
-		writeCtx, cancel := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
-		defer cancel()
-		return clientConn.Write(writeCtx, coderws.MessageText, message)
-	}
-
-	readClientMessage := func() ([]byte, error) {
-		msgType, payload, readErr := clientConn.Read(ctx)
-		if readErr != nil {
-			return nil, readErr
-		}
-		if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
-			return nil, NewOpenAIWSClientCloseError(
-				coderws.StatusPolicyViolation,
-				fmt.Sprintf("unsupported websocket client message type: %s", msgType.String()),
-				nil,
-			)
-		}
-		return payload, nil
-	}
-
 	var markBrokenIngressLease func(*openAIWSConnLease, string)
 
 	sendAndRelay := func(
@@ -2941,10 +3333,66 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		expectedPrevForRecovery string,
 		expectedPrevFromSessionState bool,
 	) (*OpenAIForwardResult, error) {
+		turnStart := time.Now()
+		if useHTTPBridge {
+			bridgeBody, bridgeErr := buildOpenAIWSHTTPBridgeRequestBody(payload)
+			if bridgeErr != nil {
+				return nil, wrapOpenAIWSIngressTurnError(
+					"build_http_bridge_payload",
+					bridgeErr,
+					false,
+				)
+			}
+			emitBridgeFailure := func(message string) (*OpenAIForwardResult, error) {
+				if err := writeClientMessage(buildOpenAIWSBridgeFailedEvent(message)); err != nil {
+					return nil, wrapOpenAIWSIngressTurnError(
+						"write_client",
+						fmt.Errorf("write websocket bridge failure event: %w", err),
+						false,
+					)
+				}
+				return &OpenAIForwardResult{
+					RequestID:       "",
+					Usage:           OpenAIUsage{},
+					Model:           originalModel,
+					ServiceTier:     extractOpenAIServiceTierFromBody(payload),
+					ReasoningEffort: extractOpenAIReasoningEffortFromBody(payload, originalModel),
+					Stream:          true,
+					OpenAIWSMode:    true,
+					ResponseHeaders: http.Header{},
+					Duration:        time.Since(turnStart),
+				}, nil
+			}
+			setOpsUpstreamRequestBody(c, bridgeBody)
+			c.Set("openai_passthrough", true)
+			upstreamReq, buildErr := s.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, bridgeBody, token)
+			if buildErr != nil {
+				return emitBridgeFailure(buildErr.Error())
+			}
+			upstreamReq.Header.Set("accept", "text/event-stream")
+			proxyURL := ""
+			if account.ProxyID != nil && account.Proxy != nil {
+				proxyURL = account.Proxy.URL()
+			}
+			upstreamStart := time.Now()
+			resp, requestErr := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+			SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+			if requestErr != nil {
+				return emitBridgeFailure(requestErr.Error())
+			}
+			return s.relayOpenAIWSHTTPBridgeStream(
+				ctx,
+				resp,
+				account,
+				payload,
+				originalModel,
+				turnStart,
+				writeClientMessage,
+			)
+		}
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
 		}
-		turnStart := time.Now()
 		wroteDownstream := false
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
 			return nil, wrapOpenAIWSIngressTurnError(
@@ -3302,12 +3750,16 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	turnPrevRecoveryTried := false
 	turnPrevRecoveryAllowFreshConn := false
 	turnSkipFunctionCallOutputPrevInfer := false
+	requestedCohort := OpenAIContinuationCohortStrong
+	if useHTTPBridge {
+		requestedCohort = OpenAIContinuationCohortDegraded
+	}
 	var currentTurnTicket *OpenAIResponsesTurnTicket
 	currentTurnStoredState := OpenAIResponsesTurnStoredState{
 		ClientRequestID: openAIWSIngressClientRequestID(ctx),
 		AccountID:       account.ID,
-		Cohort:          string(OpenAIContinuationCohortStrong),
-		Transport:       string(OpenAIUpstreamTransportResponsesWebsocketV2),
+		Cohort:          string(requestedCohort),
+		Transport:       string(wsDecision.Transport),
 	}
 	lastTurnFinishedAt := time.Time{}
 	lastTurnResponseID := ""
@@ -3315,6 +3767,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	var lastTurnStrictState *openAIWSIngressPreviousTurnStrictState
 	lastTurnReplayInput := []json.RawMessage(nil)
 	lastTurnReplayInputExists := false
+	lastTurnPromptCacheKey := strings.TrimSpace(firstPayload.promptCacheKey)
 	currentTurnReplayInput := []json.RawMessage(nil)
 	currentTurnReplayInputExists := false
 	skipBeforeTurn := false
@@ -3571,8 +4024,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					PromptCacheKey:     strings.TrimSpace(openAIWSPayloadStringFromRaw(currentPayload, "prompt_cache_key")),
 					Model:              currentOriginalModel,
 					ClientRequestID:    openAIWSIngressTurnDescriptorClientRequestID(ctx),
-					RequestedTransport: string(OpenAIUpstreamTransportResponsesWebsocketV2),
-					RequestedCohort:    string(OpenAIContinuationCohortStrong),
+					RequestedTransport: string(wsDecision.Transport),
+					RequestedCohort:    string(requestedCohort),
 					PayloadFingerprint: BuildOpenAIResponsesTurnPayloadFingerprint(currentPayload),
 					Stream:             true,
 					TurnOrdinal:        turn,
@@ -3676,6 +4129,83 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			currentTurnReplayInput = nextReplayInput
 			currentTurnReplayInputExists = nextReplayInputExists
 		}
+		if useHTTPBridge {
+			bridgePromptCacheKey := strings.TrimSpace(openAIWSPayloadStringFromRaw(currentPayload, "prompt_cache_key"))
+			if bridgePromptCacheKey == "" {
+				if lastTurnPromptCacheKey != "" {
+					bridgePromptCacheKey = lastTurnPromptCacheKey
+				} else if sessionHash != "" {
+					bridgePromptCacheKey = sessionHash
+				}
+			}
+			preserveBridgePreviousResponseID := currentPreviousResponseID == ""
+			if currentPreviousResponseID != "" {
+				httpPrevSupported, httpPrevKnown, httpPrevSource, httpPrevProbeErr := s.ResolveOpenAIHTTPPreviousResponseSupport(
+					ctx,
+					account,
+					currentOriginalModel,
+				)
+				if httpPrevProbeErr != nil {
+					logOpenAIWSModeInfo(
+						"ingress_ws_http_bridge_prev_probe_skip account_id=%d turn=%d conn_id=%s reason=probe_error cause=%s",
+						account.ID,
+						turn,
+						truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+						truncateOpenAIWSLogValue(httpPrevProbeErr.Error(), openAIWSLogValueMaxLen),
+					)
+				} else {
+					preserveBridgePreviousResponseID = !httpPrevKnown || httpPrevSupported
+					if httpPrevKnown && !httpPrevSupported {
+						RecordOpenAIWSContinuationHTTPPreviousResponseUnsupported()
+						logOpenAIWSModeInfo(
+							"ingress_ws_http_bridge_prev_local_replay account_id=%d turn=%d conn_id=%s previous_response_id=%s source=%s has_replay_input=%v prompt_cache_key_source=%s",
+							account.ID,
+							turn,
+							truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+							truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+							normalizeOpenAIWSLogValue(httpPrevSource),
+							currentTurnReplayInputExists,
+							func() string {
+								if strings.TrimSpace(openAIWSPayloadStringFromRaw(currentPayload, "prompt_cache_key")) != "" {
+									return "payload"
+								}
+								if lastTurnPromptCacheKey != "" {
+									return "last_turn"
+								}
+								if sessionHash != "" {
+									return "session_hash"
+								}
+								return "none"
+							}(),
+						)
+					}
+				}
+			}
+			preparedPayload, promptInjected, replayApplied, prepareErr := prepareOpenAIWSHTTPBridgePayload(
+				currentPayload,
+				currentTurnReplayInput,
+				currentTurnReplayInputExists,
+				bridgePromptCacheKey,
+				preserveBridgePreviousResponseID,
+			)
+			if prepareErr != nil {
+				return fmt.Errorf("prepare http bridge payload: %w", prepareErr)
+			}
+			if promptInjected {
+				logOpenAIWSModeInfo(
+					"ingress_ws_http_bridge_prompt_cache_key_injected account_id=%d turn=%d conn_id=%s prompt_cache_key=%s",
+					account.ID,
+					turn,
+					truncateOpenAIWSLogValue(sessionConnID, openAIWSIDValueMaxLen),
+					truncateOpenAIWSLogValue(bridgePromptCacheKey, openAIWSHeaderValueMaxLen),
+				)
+			}
+			if replayApplied {
+				currentPreviousResponseID = ""
+			}
+			currentPayload = preparedPayload
+			currentPayloadBytes = len(preparedPayload)
+		}
 		if storeDisabled && turn > 1 && currentPreviousResponseID != "" {
 			shouldKeepPreviousResponseID := false
 			strictReason := ""
@@ -3762,7 +4292,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 		}
 		forcePreferredConn := isStrictAffinityTurn(currentPayload) && !turnPrevRecoveryAllowFreshConn
-		if sessionLease == nil {
+		if !useHTTPBridge && sessionLease == nil {
 			acquiredLease, acquireErr := acquireTurnLease(turn, preferredConnID, forcePreferredConn)
 			if acquireErr != nil {
 				return fmt.Errorf("acquire upstream websocket: %w", acquireErr)
@@ -3775,7 +4305,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				unpinSessionConn(sessionConnID)
 			}
 		}
-		shouldPreflightPing := turn > 1 && sessionLease != nil && turnRetry == 0
+		shouldPreflightPing := !useHTTPBridge && turn > 1 && sessionLease != nil && turnRetry == 0
 		if shouldPreflightPing && openAIWSIngressPreflightPingIdle > 0 && !lastTurnFinishedAt.IsZero() {
 			if time.Since(lastTurnFinishedAt) < openAIWSIngressPreflightPingIdle {
 				shouldPreflightPing = false
@@ -3986,6 +4516,20 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 		}
 		connID := sessionConnID
+		if useHTTPBridge {
+			connID = "http_bridge"
+		}
+		if useHTTPBridge && currentPreviousResponseID != "" {
+			RecordOpenAIWSContinuationWSToHTTPMidSession()
+			logOpenAIWSModeInfo(
+				"ingress_ws_http_bridge_turn account_id=%d turn=%d conn_id=%s previous_response_id=%s transport=%s",
+				account.ID,
+				turn,
+				truncateOpenAIWSLogValue(connID, openAIWSIDValueMaxLen),
+				truncateOpenAIWSLogValue(currentPreviousResponseID, openAIWSIDValueMaxLen),
+				normalizeOpenAIWSLogValue(string(wsDecision.Transport)),
+			)
+		}
 		if currentPreviousResponseID != "" {
 			chainedFromLast := expectedPrev != "" && currentPreviousResponseID == expectedPrev
 			currentPreviousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(currentPreviousResponseID)
@@ -4055,6 +4599,21 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		lastTurnPayload = cloneOpenAIWSPayloadBytes(currentPayload)
 		lastTurnReplayInput = cloneOpenAIWSRawMessages(currentTurnReplayInput)
 		lastTurnReplayInputExists = currentTurnReplayInputExists
+		if useHTTPBridge && result.ReplayInputSet {
+			lastTurnReplayInput, lastTurnReplayInputExists = appendOpenAIWSReplayInputItems(
+				currentTurnReplayInput,
+				currentTurnReplayInputExists,
+				result.ReplayInput,
+				result.ReplayInputSet,
+			)
+		}
+		lastTurnPromptCacheKey = strings.TrimSpace(result.PromptCacheKey)
+		if lastTurnPromptCacheKey == "" {
+			lastTurnPromptCacheKey = strings.TrimSpace(openAIWSPayloadStringFromRaw(currentPayload, "prompt_cache_key"))
+		}
+		if lastTurnPromptCacheKey == "" {
+			lastTurnPromptCacheKey = strings.TrimSpace(sessionHash)
+		}
 		nextStrictState, strictStateErr := buildOpenAIWSIngressPreviousTurnStrictState(currentPayload)
 		if strictStateErr != nil {
 			lastTurnStrictState = nil
@@ -4072,15 +4631,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if responseID != "" && stateStore != nil {
 			ttl := s.openAIWSResponseStickyTTL()
 			logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
-			stateStore.BindResponseConn(responseID, connID, ttl)
+			if !useHTTPBridge {
+				stateStore.BindResponseConn(responseID, connID, ttl)
+			}
 			if sessionHash != "" {
 				stateStore.BindSessionLastResponse(groupID, sessionHash, responseID, ttl)
 			}
 		}
-		if stateStore != nil && storeDisabled && sessionHash != "" {
+		if !useHTTPBridge && stateStore != nil && storeDisabled && sessionHash != "" {
 			stateStore.BindSessionConn(groupID, sessionHash, connID, s.openAIWSSessionStickyTTL())
 		}
-		if connID != "" {
+		if !useHTTPBridge && connID != "" {
 			preferredConnID = connID
 		}
 
@@ -4128,7 +4689,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				storeDisabled,
 			)
 		}
-		if stateStore != nil && nextPayload.previousResponseID != "" {
+		if !useHTTPBridge && stateStore != nil && nextPayload.previousResponseID != "" {
 			if stickyConnID, ok := stateStore.GetResponseConn(nextPayload.previousResponseID); ok {
 				if sessionConnID != "" && stickyConnID != "" && stickyConnID != sessionConnID {
 					logOpenAIWSModeInfo(
@@ -4464,7 +5025,7 @@ func (s *OpenAIGatewayService) SelectAccountByPreviousResponseID(
 	}
 	// 非 WSv2 场景（如 force_http/全局关闭）不应使用 previous_response_id 粘连，
 	// 以保持“回滚到 HTTP”后的历史行为一致性。
-	if s.getOpenAIWSProtocolResolver().Resolve(account).Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
+	if s.resolveOpenAIWSProtocolDecisionForRuntime(account).Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return nil, nil
 	}
 	if shouldClearStickySession(account, requestedModel) || !account.IsOpenAI() || !account.IsSchedulable() {

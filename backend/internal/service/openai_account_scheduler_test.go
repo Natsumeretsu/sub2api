@@ -942,9 +942,9 @@ func TestOpenAIGatewayService_SchedulerWrappersAndDefaults(t *testing.T) {
 
 func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *testing.T) {
 	scheduler := &defaultOpenAIAccountScheduler{}
-	require.True(t, scheduler.isAccountTransportCompatible(nil, OpenAIUpstreamTransportAny))
-	require.True(t, scheduler.isAccountTransportCompatible(nil, OpenAIUpstreamTransportHTTPSSE))
-	require.False(t, scheduler.isAccountTransportCompatible(nil, OpenAIUpstreamTransportResponsesWebsocketV2))
+	require.True(t, scheduler.isAccountTransportCompatible(context.Background(), nil, OpenAIUpstreamTransportAny, ""))
+	require.True(t, scheduler.isAccountTransportCompatible(context.Background(), nil, OpenAIUpstreamTransportHTTPSSE, ""))
+	require.False(t, scheduler.isAccountTransportCompatible(context.Background(), nil, OpenAIUpstreamTransportResponsesWebsocketV2, ""))
 
 	cfg := newOpenAIWSV2TestConfig()
 	scheduler.service = &OpenAIGatewayService{cfg: cfg}
@@ -962,7 +962,7 @@ func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *
 			"openai_apikey_responses_websockets_v2_enabled": true,
 		},
 	}
-	require.True(t, scheduler.isAccountTransportCompatible(account, OpenAIUpstreamTransportResponsesWebsocketV2))
+	require.True(t, scheduler.isAccountTransportCompatible(context.Background(), account, OpenAIUpstreamTransportResponsesWebsocketV2, "gpt-5.4"))
 }
 
 func TestDefaultOpenAIAccountScheduler_Select_PrefersStrongCohortBeforeDegraded(t *testing.T) {

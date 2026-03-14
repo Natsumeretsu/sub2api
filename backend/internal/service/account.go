@@ -843,28 +843,51 @@ func (a *Account) openAIResponsesCompactCapabilityKeys() []string {
 }
 
 func (a *Account) SupportsOpenAIResponsesWebSocketTransport() bool {
-	if !a.IsOpenAI() {
+	supported, decided, _ := a.ResolveOpenAIResponsesWebSocketTransportCapability()
+	if !decided {
 		return false
+	}
+	return supported
+}
+
+func (a *Account) ResolveOpenAIResponsesWebSocketTransportCapability() (supported bool, decided bool, source string) {
+	if !a.IsOpenAI() {
+		return false, true, "non_openai"
 	}
 	if a.IsOpenAIOAuth() {
-		return true
+		return true, true, "oauth_default"
 	}
 	if !a.IsOpenAIApiKey() {
-		return false
+		return false, true, "non_apikey"
 	}
-	for _, key := range []string{
-		"openai_apikey_responses_websockets_v2_supported",
-		"openai_responses_websockets_v2_supported",
-		"responses_websockets_v2_supported",
-	} {
+	for _, key := range a.openAIResponsesWebSocketTransportCapabilityKeys() {
 		if enabled, ok := a.getBoolCredential(key); ok {
-			return enabled
+			return enabled, true, "credential:" + key
 		}
 		if enabled, ok := a.getBoolExtra(key); ok {
-			return enabled
+			return enabled, true, "extra:" + key
 		}
 	}
-	return false
+	return false, false, ""
+}
+
+func (a *Account) openAIResponsesWebSocketTransportCapabilityKeys() []string {
+	keys := make([]string, 0, 5)
+	if a != nil {
+		switch {
+		case a.IsOpenAIOAuth():
+			keys = append(keys, "openai_oauth_responses_websockets_v2_supported")
+		case a.IsOpenAIApiKey():
+			keys = append(keys, "openai_apikey_responses_websockets_v2_supported")
+		}
+	}
+	keys = append(keys,
+		"openai_responses_websockets_v2_supported",
+		"responses_websockets_v2_supported",
+		"openai_websocket_transport_supported",
+		"responses_websocket_transport_supported",
+	)
+	return keys
 }
 
 // SupportsOpenAIHTTPPreviousResponseID 返回账号在 HTTP /responses surface 上是否支持 previous_response_id。

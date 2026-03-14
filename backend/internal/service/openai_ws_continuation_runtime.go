@@ -232,7 +232,7 @@ func (s *OpenAIGatewayService) resolveOpenAIContinuationCohortForRuntime(account
 	if s == nil || account == nil {
 		return OpenAIContinuationCohortDegraded
 	}
-	if s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+	if s.resolveOpenAIWSProtocolDecisionForRuntime(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return OpenAIContinuationCohortStrong
 	}
 	return OpenAIContinuationCohortDegraded

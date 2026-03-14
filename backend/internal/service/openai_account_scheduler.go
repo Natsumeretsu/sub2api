@@ -274,7 +274,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			return nil, decision, err
 		}
 		if selection != nil && selection.Account != nil {
-			if !s.isAccountTransportCompatible(selection.Account, req.RequiredTransport) {
+			if !s.isAccountTransportCompatible(ctx, selection.Account, req.RequiredTransport, req.RequestedModel) {
 				selection = nil
 			}
 		}
@@ -283,7 +283,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			decision.StickyPreviousHit = true
 			decision.SelectedAccountID = selection.Account.ID
 			decision.SelectedAccountType = selection.Account.Type
-			decision.SelectedCohort = string(s.resolveAccountContinuationCohort(selection.Account))
+			decision.SelectedCohort = string(s.resolveAccountContinuationCohort(ctx, selection.Account, req.RequestedModel))
 			if req.SessionHash != "" {
 				_ = s.service.BindStickySession(ctx, req.GroupID, req.SessionHash, selection.Account.ID)
 			}
@@ -300,7 +300,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		decision.StickySessionHit = true
 		decision.SelectedAccountID = selection.Account.ID
 		decision.SelectedAccountType = selection.Account.Type
-		decision.SelectedCohort = string(s.resolveAccountContinuationCohort(selection.Account))
+		decision.SelectedCohort = string(s.resolveAccountContinuationCohort(ctx, selection.Account, req.RequestedModel))
 		return selection, decision, nil
 	}
 
@@ -316,7 +316,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	if selection != nil && selection.Account != nil {
 		decision.SelectedAccountID = selection.Account.ID
 		decision.SelectedAccountType = selection.Account.Type
-		decision.SelectedCohort = string(s.resolveAccountContinuationCohort(selection.Account))
+		decision.SelectedCohort = string(s.resolveAccountContinuationCohort(ctx, selection.Account, req.RequestedModel))
 		if req.CacheAffinityKey != "" {
 			decision.CacheAffinityUsed = true
 			decision.CacheAffinityScore = computeOpenAICacheAffinityScore(req.CacheAffinityKey, selection.Account.ID)
@@ -363,7 +363,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
 		return nil, nil
 	}
-	if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
+	if !s.isAccountTransportCompatible(ctx, account, req.RequiredTransport, req.RequestedModel) {
 		_ = s.service.deleteStickySessionAccountID(ctx, req.GroupID, sessionHash)
 		return nil, nil
 	}
@@ -625,7 +625,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
 			continue
 		}
-		if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
+		if !s.isAccountTransportCompatible(ctx, account, req.RequiredTransport, req.RequestedModel) {
 			continue
 		}
 		filtered = append(filtered, account)
@@ -643,7 +643,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		cohortFiltered := make([]*Account, 0, len(filtered))
 		cohortLoadReq := make([]AccountWithConcurrency, 0, len(loadReq))
 		for i, account := range filtered {
-			if s.resolveAccountContinuationCohort(account) != requiredCohort {
+			if s.resolveAccountContinuationCohort(ctx, account, req.RequestedModel) != requiredCohort {
 				continue
 			}
 			cohortFiltered = append(cohortFiltered, account)
@@ -753,7 +753,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	for i := 0; i < len(selectionOrder); i++ {
 		candidate := selectionOrder[i]
 		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.RequestedModel)
-		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) {
+		if fresh == nil || !s.isAccountTransportCompatible(ctx, fresh, req.RequiredTransport, req.RequestedModel) {
 			continue
 		}
 		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
@@ -776,7 +776,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	// WaitPlan.MaxConcurrency 使用 Concurrency（非 EffectiveLoadFactor），因为 WaitPlan 控制的是 Redis 实际并发槽位等待。
 	for _, candidate := range selectionOrder {
 		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.RequestedModel)
-		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) {
+		if fresh == nil || !s.isAccountTransportCompatible(ctx, fresh, req.RequiredTransport, req.RequestedModel) {
 			continue
 		}
 		return &AccountSelectionResult{
@@ -793,7 +793,12 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	return nil, len(candidates), topK, loadSkew, cohortFallback, errors.New("no available accounts")
 }
 
-func (s *defaultOpenAIAccountScheduler) isAccountTransportCompatible(account *Account, requiredTransport OpenAIUpstreamTransport) bool {
+func (s *defaultOpenAIAccountScheduler) isAccountTransportCompatible(
+	ctx context.Context,
+	account *Account,
+	requiredTransport OpenAIUpstreamTransport,
+	requestedModel string,
+) bool {
 	// HTTP 入站可回退到 HTTP 线路，不需要在账号选择阶段做传输协议强过滤。
 	if requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE {
 		return true
@@ -801,7 +806,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountTransportCompatible(account *Ac
 	if s == nil || s.service == nil || account == nil {
 		return false
 	}
-	return s.service.getOpenAIWSProtocolResolver().Resolve(account).Transport == requiredTransport
+	return s.service.resolveOpenAIWSProtocolDecision(ctx, account, requestedModel).Transport == requiredTransport
 }
 
 func normalizeOpenAIRequiredCohort(requiredCohort OpenAIContinuationCohort, requiredTransport OpenAIUpstreamTransport) OpenAIContinuationCohort {
@@ -849,11 +854,15 @@ func computeOpenAICacheAffinityScore(cacheAffinityKey string, accountID int64) f
 	return float64(value) / float64(math.MaxUint64)
 }
 
-func (s *defaultOpenAIAccountScheduler) resolveAccountContinuationCohort(account *Account) OpenAIContinuationCohort {
+func (s *defaultOpenAIAccountScheduler) resolveAccountContinuationCohort(
+	ctx context.Context,
+	account *Account,
+	requestedModel string,
+) OpenAIContinuationCohort {
 	if s == nil || s.service == nil || account == nil {
 		return OpenAIContinuationCohortDegraded
 	}
-	if s.service.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+	if s.service.resolveOpenAIWSProtocolDecision(ctx, account, requestedModel).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return OpenAIContinuationCohortStrong
 	}
 	return OpenAIContinuationCohortDegraded

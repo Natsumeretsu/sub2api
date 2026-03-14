@@ -1460,16 +1460,34 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	)
 	anchor := h.gatewayService.ResolveOpenAIWSContinuationAnchor(ctx, apiKey.GroupID, sessionHash, previousResponseID)
 	wsPromptCacheKey := strings.TrimSpace(gjson.GetBytes(firstMessage, "prompt_cache_key").String())
-	selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
-		ctx,
-		apiKey.GroupID,
-		previousResponseID,
-		sessionHash,
-		reqModel,
-		nil,
-		service.OpenAIUpstreamTransportResponsesWebsocketV2,
-		wsPromptCacheKey,
-	)
+	selectWSIngressAccount := func(requiredTransport service.OpenAIUpstreamTransport) (*service.AccountSelectionResult, service.OpenAIAccountScheduleDecision, error) {
+		return h.gatewayService.SelectAccountWithScheduler(
+			ctx,
+			apiKey.GroupID,
+			previousResponseID,
+			sessionHash,
+			reqModel,
+			nil,
+			requiredTransport,
+			wsPromptCacheKey,
+		)
+	}
+	selection, scheduleDecision, err := selectWSIngressAccount(service.OpenAIUpstreamTransportResponsesWebsocketV2)
+	if (err != nil || selection == nil || selection.Account == nil) && (strings.Contains(strings.ToLower(strings.TrimSpace(fmt.Sprint(err))), "no available") || selection == nil || selection.Account == nil) {
+		fallbackSelection, fallbackDecision, fallbackErr := selectWSIngressAccount(service.OpenAIUpstreamTransportAny)
+		if fallbackErr == nil && fallbackSelection != nil && fallbackSelection.Account != nil {
+			reqLog.Info("openai.websocket_account_select_bridge_fallback",
+				zap.Bool("has_previous_response_id", previousResponseID != ""),
+				zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+				zap.Int64("selected_account_id", fallbackSelection.Account.ID),
+				zap.String("selected_account_name", fallbackSelection.Account.Name),
+				zap.String("selected_account_type", fallbackSelection.Account.Type),
+			)
+			selection = fallbackSelection
+			scheduleDecision = fallbackDecision
+			err = nil
+		}
+	}
 	if err != nil {
 		reqLog.Warn("openai.websocket_account_select_failed", zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
