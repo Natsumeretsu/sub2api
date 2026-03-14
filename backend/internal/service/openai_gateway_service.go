@@ -4539,6 +4539,7 @@ type OpenAIRecordUsageInput struct {
 // RecordUsage records usage and deducts balance
 func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRecordUsageInput) error {
 	result := input.Result
+	resolvedRequestID := resolveOpenAITurnRequestID(ctx, result)
 
 	// 跳过所有 token 均为零的用量记录——上游未返回 usage 时不应写入数据库
 	if result.Usage.InputTokens == 0 && result.Usage.OutputTokens == 0 &&
@@ -4557,7 +4558,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 			"force_cache_billing: %d input_tokens → cache_read_input_tokens (account=%d request_id=%s)",
 			result.Usage.InputTokens,
 			account.ID,
-			strings.TrimSpace(result.RequestID),
+			resolvedRequestID,
 		)
 		result.Usage.CacheReadInputTokens += result.Usage.InputTokens
 		result.Usage.InputTokens = 0
@@ -4615,7 +4616,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		UserID:                user.ID,
 		APIKeyID:              apiKey.ID,
 		AccountID:             account.ID,
-		RequestID:             result.RequestID,
+		RequestID:             resolvedRequestID,
 		Model:                 billingModel,
 		ServiceTier:           result.ServiceTier,
 		ReasoningEffort:       result.ReasoningEffort,

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -83,4 +84,43 @@ func TestOpenAIGatewayServiceRecordUsage_EmitsTurnTokenAttributionLog(t *testing
 	require.True(t, sink.ContainsFieldValue("replay_input_bytes", "512"))
 	require.True(t, sink.ContainsFieldValue("cache_read_tokens", "120"))
 	require.True(t, sink.ContainsFieldValue("billable_input_tokens", "180"))
+}
+
+func TestOpenAIGatewayServiceRecordUsage_FallsBackToContextRequestID(t *testing.T) {
+	sink, restore := captureStructuredLog(t)
+	defer restore()
+
+	groupID := int64(31)
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
+
+	ctx := context.WithValue(context.Background(), ctxkey.RequestID, "req-turn-attr-fallback")
+	err := svc.RecordUsage(ctx, &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			Usage: OpenAIUsage{
+				InputTokens:  12,
+				OutputTokens: 3,
+			},
+			Model: "gpt-5.4",
+		},
+		APIKey: &APIKey{
+			ID:      10031,
+			GroupID: &groupID,
+			Group: &Group{
+				ID:             groupID,
+				RateMultiplier: 1.0,
+			},
+		},
+		User:            &User{ID: 20031},
+		Account:         &Account{ID: 30031},
+		ClientRequestID: "creq-turn-attr-fallback",
+	})
+
+	require.NoError(t, err)
+	require.True(t, sink.ContainsFieldValue("request_id", "req-turn-attr-fallback"))
+	require.Equal(t, 1, usageRepo.calls)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, "req-turn-attr-fallback", usageRepo.lastLog.RequestID)
 }

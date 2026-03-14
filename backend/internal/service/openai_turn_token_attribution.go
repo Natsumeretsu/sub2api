@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"go.uber.org/zap"
 )
@@ -131,6 +132,19 @@ func DecodeOpenAITurnTokenAttributionJSON(raw string) *OpenAITurnTokenAttributio
 	return &decoded
 }
 
+func resolveOpenAITurnRequestID(ctx context.Context, result *OpenAIForwardResult) string {
+	if result != nil {
+		if requestID := strings.TrimSpace(result.RequestID); requestID != "" {
+			return requestID
+		}
+	}
+	if ctx == nil {
+		return ""
+	}
+	requestID, _ := ctx.Value(ctxkey.RequestID).(string)
+	return strings.TrimSpace(requestID)
+}
+
 func emitOpenAITurnTokenAttributionLog(
 	ctx context.Context,
 	input *OpenAIRecordUsageInput,
@@ -148,10 +162,11 @@ func emitOpenAITurnTokenAttributionLog(
 			CacheReadTokens:     input.Result.Usage.CacheReadInputTokens,
 		},
 	)
+	requestID := resolveOpenAITurnRequestID(ctx, input.Result)
 
 	fields := []zap.Field{
 		zap.String("component", "service.openai_gateway"),
-		zap.String("request_id", strings.TrimSpace(input.Result.RequestID)),
+		zap.String("request_id", requestID),
 		zap.String("client_request_id", strings.TrimSpace(input.ClientRequestID)),
 		zap.String("platform", strings.TrimSpace(input.Account.Platform)),
 		zap.String("model", strings.TrimSpace(input.Result.Model)),
