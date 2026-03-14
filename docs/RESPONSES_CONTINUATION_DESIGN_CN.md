@@ -1,6 +1,6 @@
 # Responses Continuation 设计基线（Fork 版）
 
-本文档记录当前 fork 在 OpenAI Responses continuation 上的本地判断、外部交叉验证、用户体验优先的设计取舍，以及后续逐步落实路线。
+本文档记录当前 fork 在 OpenAI Responses continuation 上的本地判断、外部交叉验证、以使用逻辑完备为先的设计取舍，以及后续逐步落实路线。
 
 配套能力矩阵见：`docs/RESPONSES_CONTINUATION_CAPABILITY_MATRIX_CN.md`。
 
@@ -96,15 +96,15 @@ OpenAI 官方文档指向两个核心事实：
 - Don't Break the Cache: <https://arxiv.org/abs/2601.06007>
 - OpenAI Codex issue: <https://github.com/openai/codex/issues/5087>
 
-## 3. 设计取舍：用户体验优先
+## 3. 设计取舍：使用逻辑完备优先
 
 本 fork 的目标优先级调整为：
 
-1. 用户体验
+1. 使用逻辑完备
 2. continuation correctness
-3. 工程完备与实现纯度
+3. 用户体验与实现纯度
 
-这不等于“为了体验无脑放行”，而是把策略改成分层：
+这不等于“为了完备无脑 fail-close”，而是把策略改成分层：
 
 ### 3.1 不再把问题简化成二选一
 
@@ -226,6 +226,37 @@ OpenAI 官方文档指向两个核心事实：
 - 不把连接亲和状态当作 correctness 唯一来源
 - 不引入 full transcript replay 或 merge
 
+### 4.3 turn token 归因与请求钻取
+
+当前 fork 已经把 degraded bridge 相关的 token 消耗从“靠数据库反推”推进成“按 request_id 直接钻取”：
+
+- `usage_logs.request_id`
+  现在会跟随真实 request context 写入，而不是在异步 usage task 中丢失
+- `ops_system_logs`
+  新增 `openai.turn_token_attribution` 审计日志，并与同一 `request_id` 对齐
+- `GET /api/v1/admin/ops/requests?request_id=<...>`
+  当前返回体已可直接给出：
+  - `input_tokens`
+  - `cache_read_tokens`
+  - `openai_ws_mode`
+  - `token_attribution.bridge_used`
+  - `token_attribution.bridge_mode`
+  - `token_attribution.bridge_source`
+  - `token_attribution.replay_input_items`
+  - `token_attribution.replay_input_bytes`
+  - `token_attribution.prompt_cache_key_source`
+  - `token_attribution.prompt_cache_key_used`
+  - `token_attribution.upstream_input_tokens`
+  - `token_attribution.billable_input_tokens`
+
+因此当前再看到大输入窗口时，不需要只靠 `usage_logs` 反推“是不是 bridge、本轮 cache 读了多少、billable input 到底是多少”。同一条 request drilldown 已经可以直接回答这些问题。
+
+当前还没有承诺的点也需要说清楚：
+
+- `compact` 的前后 token 差异还没有被单条 request truthfully 拆成稳定字段
+- turn 级 token 归因当前是 request 级闭环，不是 Prometheus 级的长期聚合面
+- 如果后续要做更细的 compact delta，需要单独补上 compact 前后窗口对账，而不是把当前 `billable_input_tokens/cache_read_tokens` 误解成 compact delta
+
 ## 5. 后续路线图
 
 ### Phase 1：完成文档化与受控自包含重试
@@ -280,7 +311,7 @@ OpenAI 官方文档指向两个核心事实：
 
 只有在以下前提满足时，才考虑引入“兼容性探测”模式：
 
-- 明确是 UX-first 部署
+- 明确需要兼容性探测，且已接受该模式只作为受控边界而不是默认主路径
 - 有足够日志与指标识别误探测
 - 探测次数和触发条件严格受限
 
@@ -288,10 +319,8 @@ OpenAI 官方文档指向两个核心事实：
 
 ## 6. 当前结论
 
-当前 fork 不应再以“纯工程完备”作为唯一最优，而应以：
+当前 fork 的设计主线应固定为：
 
-- continuation 不自造错误
-- 遇到歧义时尽量不给用户制造无谓中断
-- 在不违反协议完整性的前提下优先保住用户体验
-
-作为设计主线。
+- transport / 账号 / continuation 选择先符合真实 capability 与状态机逻辑
+- continuation 不自造错误，也不把错误隐藏成模糊 fallback
+- 只有在逻辑闭环成立之后，才讨论 fail-close、受控降级与体验呈现

@@ -7,7 +7,7 @@
 - 判断当前请求实际跑在 `WSv2`、HTTP 还是其他降级面
 - 明确 `previous_response_id` 是否会被保留
 - 明确 `function_call_output` 是本地校验、受控恢复，还是直接降级
-- 为后续指标、压测和 UX 调优提供统一术语
+- 为后续指标、压测、调度与成本归因提供统一术语
 
 不适用目标：
 
@@ -184,15 +184,45 @@
 - 跨实例汇总
 - 长周期持久化指标
 
-## 5. 与用户体验优先的关系
+当前已经新增了一条 request 级 token 归因闭环，用来解释 degraded bridge 场景下“token 为什么突然涨”：
 
-本 matrix 的核心不是“哪里最纯”，而是“哪里最能稳定地给用户正确又不中断的体验”。
+- `usage_logs` 记录真实 `request_id`
+- `ops_system_logs` 新增 `openai.turn_token_attribution`
+- `GET /api/v1/admin/ops/requests?request_id=<...>` 已能直接返回：
+  - `input_tokens`
+  - `cache_read_tokens`
+  - `openai_ws_mode`
+  - `token_attribution.bridge_used`
+  - `token_attribution.bridge_mode`
+  - `token_attribution.bridge_source`
+  - `token_attribution.replay_input_items`
+  - `token_attribution.replay_input_bytes`
+  - `token_attribution.prompt_cache_key_source`
+  - `token_attribution.prompt_cache_key_used`
+  - `token_attribution.upstream_input_tokens`
+  - `token_attribution.billable_input_tokens`
+
+这条面当前能回答：
+
+- 当前 turn 是否走了 bridge
+- replay input 大小是多少
+- cache 读了多少
+- billable input 实际是多少
+
+这条面当前还**不能** truthfully 回答：
+
+- compact 前后 token 差异的精确 delta
+- 长周期聚合后的 per-account compact 节省率
+
+## 5. 与使用逻辑完备优先的关系
+
+本 matrix 的核心不是“哪里最纯”，也不是“哪里看起来最顺滑”，而是“哪里最符合真实 capability、最能解释当前状态机为什么这样走”。
 
 因此当前优先级是：
 
-1. 不让本地代理自造 continuation 错误
-2. 有充分依据时优先保住当轮请求
-3. 条件不足时再明确 fail-close
+1. transport / 账号 / anchored continuation 的选择先符合真实 capability
+2. 不让本地代理自造 continuation 错误
+3. 条件不足时再明确 fail-close 或受控降级
 
 这也是为什么当前强承诺面优先是 `WSv2`，而不是把所有 transport 统一包装成同一种 continuation。
 
