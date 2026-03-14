@@ -171,10 +171,10 @@ OpenAI 官方文档指向两个核心事实：
 - 无本地锚点且 payload 不自包含，则明确 fail-close
 - `session_hash -> last_response_id / turn_state` 从共享缓存回填本地时，使用共享剩余 TTL，而不是额外延长本地寿命
 - 当 `session_hash -> account_id` 粘连缺失，但 `session_hash -> last_response_id` 与 `response_id -> account_id` 仍可用时，优先从共享响应状态恢复 sticky account，并回填会话级粘连
-- HTTP 中途降级进入 `Responses(...)` 时，如果会话仍属于强 continuation cohort，则在账号选择前优先从共享会话状态回填 `previous_response_id`，并把 `requiredTransport` 收紧到 `WSv2`
-- 对强 continuation cohort 的 HTTP 中途降级，不再默认静默剥离 `previous_response_id`；只有弱会话或明确不满足 cohort 条件时才继续走旧的 strip 行为
-- `previous_response_id` 是否能在 HTTP fallback surface 上继续使用，必须单独建模，不能从 `WSv2` continuation capability 推导。当前 fork 对 OpenAI API-key surface 默认视为支持，对 OpenAI OAuth passthrough HTTP surface 默认视为不支持，除非账号显式声明 `openai_oauth_http_previous_response_id_supported=true`
-- 一旦请求仍然是 response-bound continuation，而当前选中的 HTTP fallback surface 又明确不支持 `previous_response_id`，handler 现在会直接返回显式 `503 Strong continuation is temporarily unavailable ...`，而不是把 anchored turn 继续发给 upstream 换回 `400 Unsupported parameter: previous_response_id`
+- HTTP 中途降级进入 `Responses(...)` 时，如果当前 turn 仍然是 response-bound continuation，handler 仍会优先从共享会话状态回填 `previous_response_id`；但账号选择阶段不再先把 `requiredTransport` 硬锁到 `WSv2`，而是允许选中同账号 HTTP candidate 后再判断该 surface 是否真的支持 `previous_response_id`
+- 对强 continuation cohort 的 HTTP 中途降级，不再默认静默剥离 `previous_response_id`；只有弱会话或明确不满足 anchored continuation 条件时才继续走旧的 strip 行为
+- `previous_response_id` 是否能在 HTTP fallback surface 上继续使用，必须单独建模，不能从 `WSv2` continuation capability 推导。当前 fork 会先吃账号显式声明，再吃静态默认，再对自定义 API-key surface 做 runtime probe：OpenAI OAuth passthrough HTTP surface 默认视为不支持，官方 OpenAI API-key surface 默认视为支持，第三方 API-key surface 以 probe 结果为准
+- 一旦请求仍然是 response-bound continuation，而当前选中的 HTTP fallback surface 又明确不支持 `previous_response_id`，handler 现在会直接返回显式 `503 Strong continuation is temporarily unavailable ...`；不会再先在 scheduler 阶段误报 `no available OpenAI accounts`，也不会把 anchored turn 继续发给 upstream 换回 `400 Unsupported parameter: previous_response_id`
 - 当 service 已经捕获到上游结构化 4xx，但尚未来得及写客户端响应时，handler fallback 现在会优先消费 `ops_upstream_status_code / message / detail`：`Unsupported parameter: previous_response_id` 会被提升成显式 `503` 软中断；其余可理解的 upstream 4xx（例如 `previous_response_not_found`）则直接按结构化 4xx 返回给客户端，不再被泛化成 `502 Upstream request failed`
 - `client_request_id` 中间件现在优先接受客户端显式传入的 `X-Client-Request-ID` / `Client-Request-ID`，再退回本地生成 UUID，作为后续 turn 级幂等键的最小基础
 - 当客户端显式提供 `client_request_id` 时，turn 级幂等键优先跟随该键，并且不会因为 `previous_response_id` 的对齐、剥离或陈旧漂移而改变；当客户端未显式提供时，网关会退回到 `session_hash + previous_response_id + payload fingerprint` 派生键，避免每次重试都重新生成完全无关的 UUID
