@@ -58,6 +58,15 @@ func TestBuildOpenAICompactWindowAttribution(t *testing.T) {
 		"req-compact-1",
 		4200,
 		previousCompactAttr,
+		&OpenAICompactWindowRollup{
+			TurnCount:           3,
+			BridgeTurnCount:     3,
+			ReplayInputItems:    9,
+			ReplayInputBytes:    1408,
+			BillableInputTokens: 5031,
+			CacheReadTokens:     9312,
+			UpstreamInputTokens: 14343,
+		},
 	)
 
 	require.NotNil(t, window)
@@ -68,15 +77,52 @@ func TestBuildOpenAICompactWindowAttribution(t *testing.T) {
 	require.Equal(t, -383, window.BillableInputDelta)
 	require.Equal(t, -396, window.CacheReadDelta)
 	require.Equal(t, -779, window.UpstreamInputDelta)
+	require.True(t, window.WindowTotalsAvailable)
+	require.Equal(t, 3, window.WindowTurnCount)
+	require.Equal(t, 3, window.WindowBridgeTurnCount)
+	require.Equal(t, 9, window.WindowReplayInputItems)
+	require.Equal(t, 1408, window.WindowReplayInputBytes)
+	require.Equal(t, 5031, window.WindowBillableInputTokens)
+	require.Equal(t, 9312, window.WindowCacheReadTokens)
+	require.Equal(t, 14343, window.WindowUpstreamInputTokens)
 }
 
 func TestBuildOpenAICompactWindowAttribution_IgnoresCurrentCompactRequest(t *testing.T) {
 	currentAttr := &OpenAITurnTokenAttribution{CompactRequest: true}
 	previousCompactAttr := &OpenAITurnTokenAttribution{CompactRequest: true, CompactOutcome: "succeeded"}
 
-	window := BuildOpenAICompactWindowAttribution(0, 0, currentAttr, "req-compact-2", 1000, previousCompactAttr)
+	window := BuildOpenAICompactWindowAttribution(0, 0, currentAttr, "req-compact-2", 1000, previousCompactAttr, &OpenAICompactWindowRollup{TurnCount: 1})
 
 	require.Nil(t, window)
+}
+
+func TestBuildOpenAICompactWindowAttribution_IgnoresEmptyWindowRollup(t *testing.T) {
+	currentAttr := &OpenAITurnTokenAttribution{
+		UpstreamInputTokens: 1200,
+		BillableInputTokens: 400,
+		CacheReadTokens:     800,
+	}
+	previousCompactAttr := &OpenAITurnTokenAttribution{
+		CompactRequest:      true,
+		CompactOutcome:      "succeeded",
+		UpstreamInputTokens: 900,
+		BillableInputTokens: 300,
+		CacheReadTokens:     600,
+	}
+
+	window := BuildOpenAICompactWindowAttribution(
+		400,
+		800,
+		currentAttr,
+		"req-compact-empty",
+		500,
+		previousCompactAttr,
+		&OpenAICompactWindowRollup{},
+	)
+
+	require.NotNil(t, window)
+	require.False(t, window.WindowTotalsAvailable)
+	require.Equal(t, 0, window.WindowTurnCount)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_EmitsTurnTokenAttributionLog(t *testing.T) {

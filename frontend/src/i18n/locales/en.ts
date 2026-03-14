@@ -3359,7 +3359,9 @@ export default {
           promptCacheKey: 'Prompt cache key',
           compactWindow: 'Compact window',
           compactBefore: 'Pre-compact request',
-          compactDelta: 'Compact delta'
+          compactDelta: 'Compact delta',
+          compactWindowTotals: 'Post-compact totals',
+          compactWindowReplay: 'Post-compact replay'
         }
       },
       alertEvents: {

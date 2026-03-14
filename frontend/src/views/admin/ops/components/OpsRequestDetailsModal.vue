@@ -343,6 +343,24 @@ function formatCompactAge(ms: number | null | undefined): string {
                           <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
                           {{ formatSignedInt(row.compact_window.upstream_input_delta) }}
                         </div>
+                        <div v-if="row.compact_window.window_totals_available">
+                          {{ t('admin.ops.requestDetails.attribution.compactWindowTotals') }}
+                          {{ formatInt(row.compact_window.window_turn_count) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatInt(row.compact_window.window_bridge_turn_count) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatInt(row.compact_window.window_billable_input_tokens) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatInt(row.compact_window.window_cache_read_tokens) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatInt(row.compact_window.window_upstream_input_tokens) }}
+                        </div>
+                        <div v-if="row.compact_window.window_totals_available" class="text-amber-700/80 dark:text-amber-300/80">
+                          {{ t('admin.ops.requestDetails.attribution.compactWindowReplay') }}
+                          {{ formatInt(row.compact_window.window_replay_input_items) }}
+                          <span class="mx-1 text-amber-300 dark:text-amber-700">/</span>
+                          {{ formatInt(row.compact_window.window_replay_input_bytes) }} B
+                        </div>
                       </div>
                     </div>
                     <span v-else class="text-xs text-gray-400">-</span>

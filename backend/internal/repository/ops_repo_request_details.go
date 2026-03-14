@@ -113,7 +113,14 @@ WITH combined AS (
       WHEN compact_attr.created_at IS NOT NULL
       THEN GREATEST((EXTRACT(EPOCH FROM (ul.created_at - compact_attr.created_at)) * 1000)::BIGINT, 0)
       ELSE NULL::BIGINT
-    END AS compact_age_ms
+    END AS compact_age_ms,
+    compact_window_stats.turn_count AS compact_window_turn_count,
+    compact_window_stats.bridge_turn_count AS compact_window_bridge_turn_count,
+    compact_window_stats.replay_input_items AS compact_window_replay_input_items,
+    compact_window_stats.replay_input_bytes AS compact_window_replay_input_bytes,
+    compact_window_stats.billable_input_tokens AS compact_window_billable_input_tokens,
+    compact_window_stats.cache_read_tokens AS compact_window_cache_read_tokens,
+    compact_window_stats.upstream_input_tokens AS compact_window_upstream_input_tokens
   FROM usage_logs ul
   LEFT JOIN groups g ON g.id = ul.group_id
   LEFT JOIN accounts a ON a.id = ul.account_id
@@ -137,6 +144,24 @@ WITH combined AS (
     ORDER BY l.created_at DESC, l.id DESC
     LIMIT 1
   ) compact_attr ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT
+      COUNT(1)::BIGINT AS turn_count,
+      COALESCE(SUM(CASE WHEN COALESCE((l.extra->>'bridge_used')::BOOLEAN, false) THEN 1 ELSE 0 END), 0)::BIGINT AS bridge_turn_count,
+      COALESCE(SUM(COALESCE((l.extra->>'replay_input_items')::INT, 0)), 0)::BIGINT AS replay_input_items,
+      COALESCE(SUM(COALESCE((l.extra->>'replay_input_bytes')::INT, 0)), 0)::BIGINT AS replay_input_bytes,
+      COALESCE(SUM(COALESCE((l.extra->>'billable_input_tokens')::INT, 0)), 0)::BIGINT AS billable_input_tokens,
+      COALESCE(SUM(COALESCE((l.extra->>'cache_read_tokens')::INT, 0)), 0)::BIGINT AS cache_read_tokens,
+      COALESCE(SUM(COALESCE((l.extra->>'upstream_input_tokens')::INT, 0)), 0)::BIGINT AS upstream_input_tokens
+    FROM ops_system_logs l
+    WHERE compact_attr.created_at IS NOT NULL
+      AND l.message = 'openai.turn_token_attribution'
+      AND COALESCE(l.extra->>'session_hash', '') <> ''
+      AND COALESCE(l.extra->>'session_hash', '') = COALESCE(attr.extra->>'session_hash', '')
+      AND COALESCE((l.extra->>'compact_request')::BOOLEAN, false) = false
+      AND l.created_at > compact_attr.created_at
+      AND l.created_at <= ul.created_at
+  ) compact_window_stats ON TRUE
   WHERE ul.created_at >= $1 AND ul.created_at < $2
 
   UNION ALL
@@ -164,7 +189,14 @@ WITH combined AS (
     '{}'::jsonb::text AS attribution_json,
     NULL::TEXT AS compact_request_id,
     '{}'::jsonb::text AS compact_attribution_json,
-    NULL::BIGINT AS compact_age_ms
+    NULL::BIGINT AS compact_age_ms,
+    NULL::BIGINT AS compact_window_turn_count,
+    NULL::BIGINT AS compact_window_bridge_turn_count,
+    NULL::BIGINT AS compact_window_replay_input_items,
+    NULL::BIGINT AS compact_window_replay_input_bytes,
+    NULL::BIGINT AS compact_window_billable_input_tokens,
+    NULL::BIGINT AS compact_window_cache_read_tokens,
+    NULL::BIGINT AS compact_window_upstream_input_tokens
   FROM ops_error_logs o
   LEFT JOIN groups g ON g.id = o.group_id
   LEFT JOIN accounts a ON a.id = o.account_id
@@ -220,7 +252,14 @@ SELECT
   attribution_json,
   compact_request_id,
   compact_attribution_json,
-  compact_age_ms
+  compact_age_ms,
+  compact_window_turn_count,
+  compact_window_bridge_turn_count,
+  compact_window_replay_input_items,
+  compact_window_replay_input_bytes,
+  compact_window_billable_input_tokens,
+  compact_window_cache_read_tokens,
+  compact_window_upstream_input_tokens
 FROM combined
 %s
 %s
@@ -271,14 +310,21 @@ LIMIT $%d OFFSET $%d
 			accountID sql.NullInt64
 			groupID   sql.NullInt64
 
-			stream                 bool
-			inputTokens            sql.NullInt64
-			cacheReadTokens        sql.NullInt64
-			openAIWSMode           sql.NullBool
-			attributionJSON        sql.NullString
-			compactRequestID       sql.NullString
-			compactAttributionJSON sql.NullString
-			compactAgeMs           sql.NullInt64
+			stream                           bool
+			inputTokens                      sql.NullInt64
+			cacheReadTokens                  sql.NullInt64
+			openAIWSMode                     sql.NullBool
+			attributionJSON                  sql.NullString
+			compactRequestID                 sql.NullString
+			compactAttributionJSON           sql.NullString
+			compactAgeMs                     sql.NullInt64
+			compactWindowTurnCount           sql.NullInt64
+			compactWindowBridgeTurnCount     sql.NullInt64
+			compactWindowReplayInputItems    sql.NullInt64
+			compactWindowReplayInputBytes    sql.NullInt64
+			compactWindowBillableInputTokens sql.NullInt64
+			compactWindowCacheReadTokens     sql.NullInt64
+			compactWindowUpstreamInputTokens sql.NullInt64
 		)
 
 		if err := rows.Scan(
@@ -305,6 +351,13 @@ LIMIT $%d OFFSET $%d
 			&compactRequestID,
 			&compactAttributionJSON,
 			&compactAgeMs,
+			&compactWindowTurnCount,
+			&compactWindowBridgeTurnCount,
+			&compactWindowReplayInputItems,
+			&compactWindowReplayInputBytes,
+			&compactWindowBillableInputTokens,
+			&compactWindowCacheReadTokens,
+			&compactWindowUpstreamInputTokens,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -356,6 +409,15 @@ LIMIT $%d OFFSET $%d
 				strings.TrimSpace(compactRequestID.String),
 				compactAgeMs.Int64,
 				compactAttribution,
+				&service.OpenAICompactWindowRollup{
+					TurnCount:           int(compactWindowTurnCount.Int64),
+					BridgeTurnCount:     int(compactWindowBridgeTurnCount.Int64),
+					ReplayInputItems:    int(compactWindowReplayInputItems.Int64),
+					ReplayInputBytes:    int(compactWindowReplayInputBytes.Int64),
+					BillableInputTokens: int(compactWindowBillableInputTokens.Int64),
+					CacheReadTokens:     int(compactWindowCacheReadTokens.Int64),
+					UpstreamInputTokens: int(compactWindowUpstreamInputTokens.Int64),
+				},
 			),
 		}
 

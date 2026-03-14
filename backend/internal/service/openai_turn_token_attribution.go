@@ -37,6 +37,37 @@ type OpenAICompactWindowAttribution struct {
 	BillableInputDelta                 int    `json:"billable_input_delta"`
 	CacheReadDelta                     int    `json:"cache_read_delta"`
 	UpstreamInputDelta                 int    `json:"upstream_input_delta"`
+	WindowTotalsAvailable              bool   `json:"window_totals_available"`
+	WindowTurnCount                    int    `json:"window_turn_count"`
+	WindowBridgeTurnCount              int    `json:"window_bridge_turn_count"`
+	WindowReplayInputItems             int    `json:"window_replay_input_items"`
+	WindowReplayInputBytes             int    `json:"window_replay_input_bytes"`
+	WindowBillableInputTokens          int    `json:"window_billable_input_tokens"`
+	WindowCacheReadTokens              int    `json:"window_cache_read_tokens"`
+	WindowUpstreamInputTokens          int    `json:"window_upstream_input_tokens"`
+}
+
+type OpenAICompactWindowRollup struct {
+	TurnCount           int
+	BridgeTurnCount     int
+	ReplayInputItems    int
+	ReplayInputBytes    int
+	BillableInputTokens int
+	CacheReadTokens     int
+	UpstreamInputTokens int
+}
+
+func hasOpenAICompactWindowRollupData(input *OpenAICompactWindowRollup) bool {
+	if input == nil {
+		return false
+	}
+	return input.TurnCount > 0 ||
+		input.BridgeTurnCount > 0 ||
+		input.ReplayInputItems > 0 ||
+		input.ReplayInputBytes > 0 ||
+		input.BillableInputTokens > 0 ||
+		input.CacheReadTokens > 0 ||
+		input.UpstreamInputTokens > 0
 }
 
 func cloneOpenAITurnTokenAttribution(input *OpenAITurnTokenAttribution) *OpenAITurnTokenAttribution {
@@ -152,6 +183,7 @@ func BuildOpenAICompactWindowAttribution(
 	previousCompactRequestID string,
 	previousCompactAgeMs int64,
 	previousCompactAttr *OpenAITurnTokenAttribution,
+	windowRollup *OpenAICompactWindowRollup,
 ) *OpenAICompactWindowAttribution {
 	if previousCompactAttr == nil || !previousCompactAttr.CompactRequest {
 		return nil
@@ -176,6 +208,16 @@ func BuildOpenAICompactWindowAttribution(
 		window.CacheReadDelta = currentCacheReadTokens - previousCompactAttr.CacheReadTokens
 		window.UpstreamInputDelta = currentAttr.UpstreamInputTokens - previousCompactAttr.UpstreamInputTokens
 	}
+	if hasOpenAICompactWindowRollupData(windowRollup) && strings.EqualFold(outcome, "succeeded") {
+		window.WindowTotalsAvailable = true
+		window.WindowTurnCount = windowRollup.TurnCount
+		window.WindowBridgeTurnCount = windowRollup.BridgeTurnCount
+		window.WindowReplayInputItems = windowRollup.ReplayInputItems
+		window.WindowReplayInputBytes = windowRollup.ReplayInputBytes
+		window.WindowBillableInputTokens = windowRollup.BillableInputTokens
+		window.WindowCacheReadTokens = windowRollup.CacheReadTokens
+		window.WindowUpstreamInputTokens = windowRollup.UpstreamInputTokens
+	}
 
 	if window.PreviousCompactRequestID == "" &&
 		window.PreviousCompactOutcome == "" &&
@@ -183,6 +225,7 @@ func BuildOpenAICompactWindowAttribution(
 		window.PreviousCompactInputTokens == 0 &&
 		window.PreviousCompactCacheReadTokens == 0 &&
 		window.PreviousCompactUpstreamInputTokens == 0 &&
+		!window.WindowTotalsAvailable &&
 		!window.DeltaAvailable {
 		return nil
 	}

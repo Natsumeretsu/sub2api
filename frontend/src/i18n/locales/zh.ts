@@ -3532,7 +3532,9 @@ export default {
           promptCacheKey: '缓存键来源',
           compactWindow: 'Compact 窗口',
           compactBefore: 'Compact 前请求',
-          compactDelta: 'Compact 前后差异'
+          compactDelta: 'Compact 前后差异',
+          compactWindowTotals: 'Compact 后累计',
+          compactWindowReplay: 'Compact 后回放'
         }
       },
       alertEvents: {

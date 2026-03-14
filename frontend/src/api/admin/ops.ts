@@ -292,6 +292,14 @@ export interface OpsCompactWindowAttribution {
   billable_input_delta: number
   cache_read_delta: number
   upstream_input_delta: number
+  window_totals_available: boolean
+  window_turn_count: number
+  window_bridge_turn_count: number
+  window_replay_input_items: number
+  window_replay_input_bytes: number
+  window_billable_input_tokens: number
+  window_cache_read_tokens: number
+  window_upstream_input_tokens: number
 }
 
 export interface OpsRequestDetail {
