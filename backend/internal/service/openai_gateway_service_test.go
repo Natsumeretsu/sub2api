@@ -34,6 +34,22 @@ type snapshotUpdateAccountRepo struct {
 	updateExtraCalls chan map[string]any
 }
 
+type overloadCaptureAccountRepo struct {
+	stubOpenAIAccountRepo
+	setOverloadedCalls int
+	lastCtxErr         error
+	lastAccountID      int64
+	lastUntil          time.Time
+}
+
+func (r *overloadCaptureAccountRepo) SetOverloaded(ctx context.Context, id int64, until time.Time) error {
+	r.setOverloadedCalls++
+	r.lastCtxErr = ctx.Err()
+	r.lastAccountID = id
+	r.lastUntil = until
+	return nil
+}
+
 func (r *snapshotUpdateAccountRepo) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	if r.updateExtraCalls != nil {
 		copied := make(map[string]any, len(updates))
@@ -208,7 +224,59 @@ func TestHandleStreamingResponsePassthrough_MissingDoneReturnsProtocolFailover(t
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
 	require.Contains(t, string(failoverErr.ResponseBody), "Upstream streaming response disconnected before completion")
+	require.Empty(t, rec.Body.String())
+}
+
+func TestHandleStreamingResponsePassthrough_HealthyStreamCommitsBufferedOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 16, Name: "RightCode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.created","response":{"id":"resp_1"}}`,
+			`data: {"type":"response.output_text.delta","delta":"hel"}`,
+			`data: {"type":"response.output_text.delta","delta":"lo"}`,
+			`data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":2}}}`,
+			`data: [DONE]`,
+		}, "\n"))),
+	}
+
+	result, err := svc.handleStreamingResponsePassthrough(context.Background(), resp, c, account, time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), `response.output_text.delta`)
+	require.Contains(t, rec.Body.String(), `[DONE]`)
+}
+
+func TestMarkOpenAIPassthroughProtocolFailure_UsesDetachedContext(t *testing.T) {
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	repo := &overloadCaptureAccountRepo{}
+	svc := &OpenAIGatewayService{
+		accountRepo: repo,
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				OpenAIWS: config.GatewayOpenAIWSConfig{
+					FallbackCooldownSeconds: 30,
+				},
+			},
+		},
+	}
+	account := &Account{ID: 14, Name: "PackyCode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+	svc.markOpenAIPassthroughProtocolFailure(parentCtx, account, "stream_missing_done")
+
+	require.Equal(t, 1, repo.setOverloadedCalls)
+	require.NoError(t, repo.lastCtxErr)
+	require.Equal(t, account.ID, repo.lastAccountID)
+	require.WithinDuration(t, time.Now().Add(30*time.Second), repo.lastUntil, 2*time.Second)
 }
 
 type stubConcurrencyCache struct {

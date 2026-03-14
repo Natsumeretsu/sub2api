@@ -40,6 +40,11 @@ const (
 	codexCLIUserAgent      = "codex_cli_rs/0.104.0"
 	// codex_cli_only 拒绝时单个请求头日志长度上限（字符）
 	codexCLIOnlyHeaderValueMaxBytes = 256
+	// API-key passthrough 在真正提交首字节前做一个很短的预缓冲窗口，
+	// 优先把 challenge/半截流挡在写出之前，避免用户看到重复回答与 access log 上的伪成功。
+	openAIPassthroughStreamCommitLineThreshold = 4
+	openAIPassthroughStreamCommitByteThreshold = 4 * 1024
+	openAIPassthroughProtocolCooldownTimeout   = 3 * time.Second
 
 	// OpenAIParsedRequestBodyKey 缓存 handler 侧已解析的请求体，避免重复解析。
 	OpenAIParsedRequestBodyKey = "openai_parsed_request_body"
@@ -2868,6 +2873,16 @@ type openaiStreamingResultPassthrough struct {
 	firstTokenMs *int
 }
 
+func shouldCommitOpenAIPassthroughPrebuffer(sawDone bool, nonEmptyLines, bufferedBytes int) bool {
+	if sawDone {
+		return true
+	}
+	if nonEmptyLines >= openAIPassthroughStreamCommitLineThreshold {
+		return true
+	}
+	return bufferedBytes >= openAIPassthroughStreamCommitByteThreshold
+}
+
 func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	ctx context.Context,
 	resp *http.Response,
@@ -2910,12 +2925,23 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	if !ok {
 		return nil, errors.New("streaming not supported")
 	}
+	bufferedWriter := bufio.NewWriterSize(w, 4*1024)
+	flushBuffered := func() error {
+		if err := bufferedWriter.Flush(); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
 
 	usage := &OpenAIUsage{}
 	var firstTokenMs *int
 	clientDisconnected := false
 	sawDone := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
+	prebuffer := bytes.NewBuffer(make([]byte, 0, 1024))
+	prebufferNonEmptyLines := 0
+	downstreamCommitted := false
 
 	scanner := bufio.NewScanner(upstreamReader)
 	maxLineSize := defaultMaxLineSize
@@ -2942,11 +2968,34 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 
 		if !clientDisconnected {
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				clientDisconnected = true
-				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+			lineWithNewline := line + "\n"
+			if !downstreamCommitted {
+				if _, err := prebuffer.WriteString(lineWithNewline); err != nil {
+					return &openaiStreamingResultPassthrough{usage: usage, firstTokenMs: firstTokenMs}, err
+				}
+				if strings.TrimSpace(line) != "" {
+					prebufferNonEmptyLines++
+				}
+				if shouldCommitOpenAIPassthroughPrebuffer(sawDone, prebufferNonEmptyLines, prebuffer.Len()) {
+					if _, err := bufferedWriter.Write(prebuffer.Bytes()); err != nil {
+						clientDisconnected = true
+						logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during initial buffered commit, continue draining upstream for usage: account=%d", account.ID)
+					} else if err := flushBuffered(); err != nil {
+						clientDisconnected = true
+						logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during initial buffered flush, continue draining upstream for usage: account=%d", account.ID)
+					}
+					prebuffer.Reset()
+					prebufferNonEmptyLines = 0
+					downstreamCommitted = true
+				}
 			} else {
-				flusher.Flush()
+				if _, err := bufferedWriter.WriteString(lineWithNewline); err != nil {
+					clientDisconnected = true
+					logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+				} else if err := flushBuffered(); err != nil {
+					clientDisconnected = true
+					logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming flush, continue draining upstream for usage: account=%d", account.ID)
+				}
 			}
 		}
 	}
@@ -4089,7 +4138,13 @@ func (s *OpenAIGatewayService) markOpenAIPassthroughProtocolFailure(ctx context.
 		return
 	}
 	until := time.Now().Add(cooldown)
-	if err := s.accountRepo.SetOverloaded(ctx, account.ID, until); err != nil {
+	persistCtx := ctx
+	if persistCtx == nil {
+		persistCtx = context.Background()
+	}
+	detachedCtx, cancel := context.WithTimeout(context.WithoutCancel(persistCtx), openAIPassthroughProtocolCooldownTimeout)
+	defer cancel()
+	if err := s.accountRepo.SetOverloaded(detachedCtx, account.ID, until); err != nil {
 		logger.FromContext(ctx).With(
 			zap.String("component", "service.openai_gateway"),
 			zap.Int64("account_id", account.ID),
