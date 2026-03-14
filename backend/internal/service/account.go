@@ -892,6 +892,13 @@ func (a *Account) SupportsOpenAIHTTPPreviousResponseID() bool {
 	if !a.IsOpenAIApiKey() {
 		return false
 	}
+	return a.isOfficialOpenAIBaseURL()
+}
+
+func (a *Account) isOfficialOpenAIBaseURL() bool {
+	if a == nil {
+		return false
+	}
 	baseURL := strings.TrimSpace(a.GetOpenAIBaseURL())
 	if baseURL == "" {
 		return false

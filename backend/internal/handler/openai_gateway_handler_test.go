@@ -892,6 +892,8 @@ func TestOpenAIShouldBlockHTTPPreviousResponseFallback(t *testing.T) {
 		passthroughOAuth,
 		service.OpenAIClientTransportHTTP,
 		false,
+		true,
+		false,
 	))
 
 	require.True(t, openAIShouldBlockHTTPPreviousResponseFallback(
@@ -900,6 +902,8 @@ func TestOpenAIShouldBlockHTTPPreviousResponseFallback(t *testing.T) {
 		passthroughOAuth,
 		service.OpenAIClientTransportHTTP,
 		false,
+		true,
+		false,
 	))
 
 	require.False(t, openAIShouldBlockHTTPPreviousResponseFallback(
@@ -907,6 +911,8 @@ func TestOpenAIShouldBlockHTTPPreviousResponseFallback(t *testing.T) {
 		"",
 		passthroughOAuth,
 		service.OpenAIClientTransportHTTP,
+		false,
+		true,
 		false,
 	))
 
@@ -920,6 +926,8 @@ func TestOpenAIShouldBlockHTTPPreviousResponseFallback(t *testing.T) {
 		},
 		service.OpenAIClientTransportHTTP,
 		false,
+		true,
+		true,
 	))
 
 	require.False(t, openAIShouldBlockHTTPPreviousResponseFallback(
@@ -927,6 +935,8 @@ func TestOpenAIShouldBlockHTTPPreviousResponseFallback(t *testing.T) {
 		"resp_123",
 		passthroughOAuth,
 		service.OpenAIClientTransportWS,
+		false,
+		true,
 		false,
 	))
 
@@ -936,6 +946,18 @@ func TestOpenAIShouldBlockHTTPPreviousResponseFallback(t *testing.T) {
 		passthroughOAuth,
 		service.OpenAIClientTransportHTTP,
 		true,
+		true,
+		false,
+	))
+
+	require.True(t, openAIShouldBlockHTTPPreviousResponseFallback(
+		anchor,
+		"resp_123",
+		passthroughOAuth,
+		service.OpenAIClientTransportHTTP,
+		false,
+		false,
+		false,
 	))
 }
 

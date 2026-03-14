@@ -51,6 +51,10 @@ const (
 	OpenAICompactPreviousResponseKnownCtxKey = "openai_compact_previous_response_known"
 	// OpenAICompactPreviousResponseSupportedCtxKey 标记当前 remote compact 请求的 selected account 是否支持 previous_response_id。
 	OpenAICompactPreviousResponseSupportedCtxKey = "openai_compact_previous_response_supported"
+	// OpenAIHTTPPreviousResponseKnownCtxKey 标记当前普通 /responses 请求的 selected account 是否已判定 HTTP previous_response 能力。
+	OpenAIHTTPPreviousResponseKnownCtxKey = "openai_http_previous_response_known"
+	// OpenAIHTTPPreviousResponseSupportedCtxKey 标记当前普通 /responses 请求的 selected account 是否支持 HTTP previous_response。
+	OpenAIHTTPPreviousResponseSupportedCtxKey = "openai_http_previous_response_supported"
 	// OpenAI WS Mode 失败后的重连次数上限（不含首次尝试）。
 	// 与 Codex 客户端保持一致：失败后最多重连 5 次。
 	openAIWSReconnectRetryLimit = 5
@@ -336,11 +340,12 @@ type OpenAIGatewayService struct {
 	openaiWSPassthroughDialer     openAIWSClientDialer
 	openaiAccountStats            *openAIAccountRuntimeStats
 
-	openaiWSFallbackUntil   sync.Map // key: int64(accountID), value: time.Time
-	openaiWSRetryMetrics    openAIWSRetryMetrics
-	openaiCompactCapability sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
-	responseHeaderFilter    *responseheaders.CompiledHeaderFilter
-	codexSnapshotThrottle   *accountWriteThrottle
+	openaiWSFallbackUntil    sync.Map // key: int64(accountID), value: time.Time
+	openaiWSRetryMetrics     openAIWSRetryMetrics
+	openaiCompactCapability  sync.Map // key: int64(accountID), value: openAICompactCapabilityObservation
+	openaiHTTPPrevCapability sync.Map // key: int64(accountID), value: openAIHTTPPreviousResponseCapabilityObservation
+	responseHeaderFilter     *responseheaders.CompiledHeaderFilter
+	codexSnapshotThrottle    *accountWriteThrottle
 }
 
 // NewOpenAIGatewayService creates a new OpenAIGatewayService
@@ -1115,8 +1120,16 @@ func ResolveOpenAIWSRequiredTransportForAnchor(anchor OpenAIWSContinuationAnchor
 	return OpenAIUpstreamTransportAny
 }
 
-func ResolveOpenAIResponsesRequiredTransport(anchor OpenAIWSContinuationAnchor, remoteCompact bool) OpenAIUpstreamTransport {
+func ResolveOpenAIResponsesRequiredTransport(
+	anchor OpenAIWSContinuationAnchor,
+	remoteCompact bool,
+	clientTransport OpenAIClientTransport,
+	responseBoundContinuation bool,
+) OpenAIUpstreamTransport {
 	if remoteCompact {
+		return OpenAIUpstreamTransportAny
+	}
+	if clientTransport == OpenAIClientTransportHTTP && responseBoundContinuation {
 		return OpenAIUpstreamTransportAny
 	}
 	return ResolveOpenAIWSRequiredTransportForAnchor(anchor)
@@ -1147,6 +1160,36 @@ func GetOpenAICompactPreviousResponseCapability(c *gin.Context) (known bool, sup
 		return false, false
 	}
 	rawSupported, ok := c.Get(OpenAICompactPreviousResponseSupportedCtxKey)
+	if !ok {
+		return true, false
+	}
+	supported, _ = rawSupported.(bool)
+	return true, supported
+}
+
+func SetOpenAIHTTPPreviousResponseCapability(c *gin.Context, known bool, supported bool) {
+	if c == nil {
+		return
+	}
+	c.Set(OpenAIHTTPPreviousResponseKnownCtxKey, known)
+	if known {
+		c.Set(OpenAIHTTPPreviousResponseSupportedCtxKey, supported)
+	}
+}
+
+func GetOpenAIHTTPPreviousResponseCapability(c *gin.Context) (known bool, supported bool) {
+	if c == nil {
+		return false, false
+	}
+	rawKnown, ok := c.Get(OpenAIHTTPPreviousResponseKnownCtxKey)
+	if !ok {
+		return false, false
+	}
+	known, _ = rawKnown.(bool)
+	if !known {
+		return false, false
+	}
+	rawSupported, ok := c.Get(OpenAIHTTPPreviousResponseSupportedCtxKey)
 	if !ok {
 		return true, false
 	}

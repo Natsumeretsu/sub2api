@@ -206,7 +206,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if anchor.FromSessionState && previousResponseID != "" {
 		c.Set(service.OpenAIContinuationPrevRecoveredCtxKey, true)
 	}
-	requiredTransport := service.ResolveOpenAIResponsesRequiredTransport(anchor, remoteCompact)
+	clientTransport := service.GetOpenAIClientTransport(c)
+	responseBoundContinuation := openAIHasResponseBoundContinuation(anchor, previousResponseID)
+	requiredTransport := service.ResolveOpenAIResponsesRequiredTransport(
+		anchor,
+		remoteCompact,
+		clientTransport,
+		responseBoundContinuation,
+	)
 
 	setOpsRequestContext(c, reqModel, reqStream, body)
 
@@ -308,6 +315,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 
 	for {
+		service.SetOpenAIHTTPPreviousResponseCapability(c, false, false)
 		// Select account supporting the requested model
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
@@ -414,6 +422,30 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.RecordOpenAIWSContinuationCacheAffinitySelection()
 		}
 		account := selection.Account
+		httpPrevKnown, httpPrevSupported := false, false
+		if !remoteCompact && account != nil && clientTransport == service.OpenAIClientTransportHTTP && responseBoundContinuation {
+			httpPrevSupported, httpPrevKnown, httpPrevSource, httpPrevProbeErr := h.gatewayService.ResolveOpenAIHTTPPreviousResponseSupport(
+				c.Request.Context(),
+				account,
+				reqModel,
+			)
+			service.SetOpenAIHTTPPreviousResponseCapability(c, httpPrevKnown, httpPrevSupported)
+			if httpPrevProbeErr != nil {
+				reqLog.Warn("openai.http_previous_response_capability_probe_failed",
+					zap.Int64("account_id", account.ID),
+					zap.String("account_name", account.Name),
+					zap.String("account_type", account.Type),
+					zap.String("base_url", account.GetOpenAIBaseURL()),
+					zap.Error(httpPrevProbeErr),
+				)
+			}
+			if httpPrevKnown {
+				reqLog = reqLog.With(
+					zap.Bool("http_previous_response_supported", httpPrevSupported),
+					zap.String("http_previous_response_support_source", httpPrevSource),
+				)
+			}
+		}
 		if isOpenAIRemoteCompactPath(c) {
 			compactSupported, compactKnown, compactSource, compactProbeErr := h.gatewayService.ResolveOpenAIResponsesCompactSupport(
 				c.Request.Context(),
@@ -471,8 +503,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			anchor,
 			previousResponseID,
 			account,
-			service.GetOpenAIClientTransport(c),
+			clientTransport,
 			isOpenAIRemoteCompactPath(c),
+			httpPrevKnown,
+			httpPrevSupported,
 		) {
 			service.RecordOpenAIWSContinuationHTTPPreviousResponseUnsupported()
 			reqLog.Warn("openai.http_previous_response_surface_unsupported",
@@ -2015,6 +2049,8 @@ func openAIShouldBlockHTTPPreviousResponseFallback(
 	account *service.Account,
 	clientTransport service.OpenAIClientTransport,
 	remoteCompact bool,
+	capabilityKnown bool,
+	capabilitySupported bool,
 ) bool {
 	if remoteCompact || account == nil {
 		return false
@@ -2025,7 +2061,10 @@ func openAIShouldBlockHTTPPreviousResponseFallback(
 	if !openAIHasResponseBoundContinuation(anchor, previousResponseID) {
 		return false
 	}
-	return !account.SupportsOpenAIHTTPPreviousResponseID()
+	if capabilityKnown {
+		return !capabilitySupported
+	}
+	return true
 }
 
 func openAIShouldForceCacheBillingAfterFailover(

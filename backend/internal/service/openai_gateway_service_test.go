@@ -580,10 +580,16 @@ func TestResolveOpenAIResponsesRequiredTransport(t *testing.T) {
 	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIWSRequiredTransportForAnchor(OpenAIWSContinuationAnchor{}))
 	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
 		StrongCohort: true,
-	}, true))
+	}, true, OpenAIClientTransportHTTP, true))
+	require.Equal(t, OpenAIUpstreamTransportAny, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
+		StrongCohort: true,
+	}, false, OpenAIClientTransportHTTP, true))
 	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
 		StrongCohort: true,
-	}, false))
+	}, false, OpenAIClientTransportHTTP, false))
+	require.Equal(t, OpenAIUpstreamTransportResponsesWebsocketV2, ResolveOpenAIResponsesRequiredTransport(OpenAIWSContinuationAnchor{
+		StrongCohort: true,
+	}, false, OpenAIClientTransportWS, true))
 }
 
 func TestGetOpenAICompactPreviousResponseCapability(t *testing.T) {
@@ -601,6 +607,26 @@ func TestGetOpenAICompactPreviousResponseCapability(t *testing.T) {
 	known, supported = GetOpenAICompactPreviousResponseCapability(c)
 	require.True(t, known)
 	require.True(t, supported)
+}
+
+func TestGetOpenAIHTTPPreviousResponseCapability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	known, supported := GetOpenAIHTTPPreviousResponseCapability(c)
+	require.False(t, known)
+	require.False(t, supported)
+
+	SetOpenAIHTTPPreviousResponseCapability(c, true, false)
+	known, supported = GetOpenAIHTTPPreviousResponseCapability(c)
+	require.True(t, known)
+	require.False(t, supported)
+
+	SetOpenAIHTTPPreviousResponseCapability(c, false, false)
+	known, supported = GetOpenAIHTTPPreviousResponseCapability(c)
+	require.False(t, known)
+	require.False(t, supported)
 }
 
 func TestBuildOpenAIStrongCohortDegradeFailover(t *testing.T) {
