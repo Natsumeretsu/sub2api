@@ -165,7 +165,8 @@ func emitOpenAITurnTokenAttributionLog(
 	requestID := resolveOpenAITurnRequestID(ctx, input.Result)
 
 	fields := []zap.Field{
-		zap.String("component", "service.openai_gateway"),
+		zap.String("component", "audit.openai_turn_token_attribution"),
+		zap.String("source_component", "service.openai_gateway"),
 		zap.String("request_id", requestID),
 		zap.String("client_request_id", strings.TrimSpace(input.ClientRequestID)),
 		zap.String("platform", strings.TrimSpace(input.Account.Platform)),
