@@ -159,8 +159,10 @@ WITH combined AS (
       AND COALESCE(l.extra->>'session_hash', '') <> ''
       AND COALESCE(l.extra->>'session_hash', '') = COALESCE(attr.extra->>'session_hash', '')
       AND COALESCE((l.extra->>'compact_request')::BOOLEAN, false) = false
-      AND l.created_at > compact_attr.created_at
-      AND l.created_at <= ul.created_at
+      AND (
+        (l.created_at > compact_attr.created_at AND l.created_at <= ul.created_at)
+        OR COALESCE(l.request_id, '') = COALESCE(ul.request_id, '')
+      )
   ) compact_window_stats ON TRUE
   WHERE ul.created_at >= $1 AND ul.created_at < $2
 
