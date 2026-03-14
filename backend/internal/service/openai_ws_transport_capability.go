@@ -234,34 +234,35 @@ func (s *OpenAIGatewayService) resolveOpenAIWSProtocolDecision(
 	account *Account,
 	requestedModel string,
 ) OpenAIWSProtocolDecision {
-	decision := s.resolveOpenAIWSProtocolDecisionForRuntime(account)
-	if account == nil || !account.IsOpenAIApiKey() {
-		return decision
-	}
-	if decision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
-		return decision
-	}
-	if strings.TrimSpace(decision.Reason) != "apikey_ws_transport_unverified" {
-		return decision
+	_ = ctx
+	_ = requestedModel
+	return s.resolveOpenAIWSProtocolDecisionForRuntime(account)
+}
+
+func (s *OpenAIGatewayService) ResolveOpenAIStrongContinuationAvailabilityInGroup(
+	ctx context.Context,
+	groupID *int64,
+) (hasStrong bool, known bool) {
+	if s == nil || s.accountRepo == nil {
+		return false, false
 	}
 
-	supported, known, source, err := s.ResolveOpenAIResponsesWebSocketTransportSupport(ctx, account, requestedModel)
-	if err != nil {
-		logOpenAIWSModeInfo(
-			"transport_capability_probe_error account_id=%d account_name=%s err=%s",
-			account.ID,
-			normalizeOpenAIWSLogValue(account.Name),
-			truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
-		)
+	var (
+		accounts []Account
+		err      error
+	)
+	if groupID != nil && *groupID > 0 {
+		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, *groupID, PlatformOpenAI)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, PlatformOpenAI)
 	}
-	if supported {
-		return OpenAIWSProtocolDecision{
-			Transport: OpenAIUpstreamTransportResponsesWebsocketV2,
-			Reason:    "ws_v2_probe_" + strings.TrimSpace(source),
+	if err != nil || len(accounts) == 0 {
+		return false, false
+	}
+	for i := range accounts {
+		if s.resolveOpenAIWSProtocolDecisionForRuntime(&accounts[i]).Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+			return true, true
 		}
 	}
-	if known {
-		return openAIWSHTTPDecision("apikey_ws_transport_" + strings.TrimSpace(source))
-	}
-	return decision
+	return false, true
 }

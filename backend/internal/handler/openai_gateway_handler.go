@@ -1496,8 +1496,20 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			wsPromptCacheKey,
 		)
 	}
-	selection, scheduleDecision, err := selectWSIngressAccount(service.OpenAIUpstreamTransportResponsesWebsocketV2)
-	if (err != nil || selection == nil || selection.Account == nil) && (strings.Contains(strings.ToLower(strings.TrimSpace(fmt.Sprint(err))), "no available") || selection == nil || selection.Account == nil) {
+	wsIngressTransport := service.OpenAIUpstreamTransportResponsesWebsocketV2
+	if hasStrong, known := h.gatewayService.ResolveOpenAIStrongContinuationAvailabilityInGroup(wsScheduleCtx, apiKey.GroupID); known && !hasStrong {
+		wsIngressTransport = service.OpenAIUpstreamTransportAny
+		reqLog.Info("openai.websocket_group_degraded_only_bridge_selected",
+			zap.Bool("has_previous_response_id", previousResponseID != ""),
+			zap.Bool("anchor_from_session_state", anchor.FromSessionState),
+			zap.Int64("sticky_account_id", anchor.StickyAccountID),
+			zap.String("group_scope", openAIGroupScopeLogValue(apiKey.GroupID)),
+		)
+	}
+	selection, scheduleDecision, err := selectWSIngressAccount(wsIngressTransport)
+	if wsIngressTransport == service.OpenAIUpstreamTransportResponsesWebsocketV2 &&
+		(err != nil || selection == nil || selection.Account == nil) &&
+		(strings.Contains(strings.ToLower(strings.TrimSpace(fmt.Sprint(err))), "no available") || selection == nil || selection.Account == nil) {
 		fallbackSelection, fallbackDecision, fallbackErr := selectWSIngressAccount(service.OpenAIUpstreamTransportAny)
 		if fallbackErr == nil && fallbackSelection != nil && fallbackSelection.Account != nil {
 			reqLog.Info("openai.websocket_account_select_bridge_fallback",
@@ -2053,6 +2065,16 @@ func openAIResponsesRequiredCohort(requiredTransport service.OpenAIUpstreamTrans
 		return string(service.OpenAIContinuationCohortStrong)
 	}
 	return string(service.OpenAIContinuationCohortDegraded)
+}
+
+func openAIGroupScopeLogValue(groupID *int64) string {
+	if groupID == nil {
+		return "ungrouped"
+	}
+	if *groupID <= 0 {
+		return "group#0"
+	}
+	return "group#" + strconv.FormatInt(*groupID, 10)
 }
 
 func openAIHasContinuationAnchor(anchor service.OpenAIWSContinuationAnchor, previousResponseID string) bool {

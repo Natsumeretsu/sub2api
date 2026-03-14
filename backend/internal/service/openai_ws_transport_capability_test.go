@@ -130,9 +130,7 @@ func TestResolveOpenAIResponsesWebSocketTransportSupport_ProbeRejectsHandshake(t
 	require.Equal(t, "probe_http_method_not_allowed", source)
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_RequiredWSV2_UsesProbedAPIKeyCapability(t *testing.T) {
-	ctx := context.Background()
-	groupID := int64(10113)
+func TestOpenAIGatewayService_ResolveOpenAIWSProtocolDecision_DoesNotProbeUnverifiedAPIKeyOnRequestPath(t *testing.T) {
 	account := Account{
 		ID:          2401,
 		Name:        "RightCode",
@@ -156,32 +154,50 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_RequiredWSV2_UsesProbed
 	cfg.Gateway.OpenAIWS.IngressModeDefault = OpenAIWSIngressModeCtxPool
 
 	svc := &OpenAIGatewayService{
-		accountRepo:               stubOpenAIAccountRepo{accounts: []Account{account}},
-		cache:                     &stubGatewayCache{},
 		cfg:                       cfg,
-		concurrencyService:        NewConcurrencyService(stubConcurrencyCache{}),
 		openaiWSPassthroughDialer: dialer,
 	}
 
-	selection, decision, err := svc.SelectAccountWithScheduler(
-		ctx,
-		&groupID,
-		"",
-		"session_hash_ws_probe",
-		"gpt-5.4",
-		nil,
-		OpenAIUpstreamTransportResponsesWebsocketV2,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, selection)
-	require.NotNil(t, selection.Account)
-	require.Equal(t, account.ID, selection.Account.ID)
-	require.Equal(t, string(OpenAIContinuationCohortStrong), decision.RequestedCohort)
-	require.Equal(t, string(OpenAIContinuationCohortStrong), decision.SelectedCohort)
-	require.Equal(t, 1, dialer.dialCount)
-	if selection.ReleaseFunc != nil {
-		selection.ReleaseFunc()
+	decision := svc.resolveOpenAIWSProtocolDecision(context.Background(), &account, "gpt-5.4")
+	require.Equal(t, OpenAIUpstreamTransportHTTPSSE, decision.Transport)
+	require.Equal(t, "apikey_ws_transport_unverified", decision.Reason)
+	require.Equal(t, 0, dialer.dialCount)
+}
+
+func TestOpenAIGatewayService_ResolveOpenAIStrongContinuationAvailabilityInGroup_UsesRuntimeObservation(t *testing.T) {
+	groupID := int64(10113)
+	account := Account{
+		ID:          2401,
+		Name:        "RightCode",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		AccountGroups: []AccountGroup{
+			{GroupID: groupID},
+		},
+		GroupIDs: []int64{groupID},
+		Extra: map[string]any{
+			"openai_apikey_responses_websockets_v2_enabled": true,
+			"openai_apikey_responses_websockets_v2_mode":    OpenAIWSIngressModePassthrough,
+		},
 	}
+	repo := newGroupAwareMockRepo([]Account{account})
+	svc := &OpenAIGatewayService{
+		accountRepo: repo,
+		cfg:         newOpenAIWSV2TestConfig(),
+	}
+
+	hasStrong, known := svc.ResolveOpenAIStrongContinuationAvailabilityInGroup(context.Background(), &groupID)
+	require.True(t, known)
+	require.False(t, hasStrong)
+
+	svc.setObservedOpenAIResponsesWebSocketTransportCapability(&account, true, "probe_ws_handshake_supported")
+
+	hasStrong, known = svc.ResolveOpenAIStrongContinuationAvailabilityInGroup(context.Background(), &groupID)
+	require.True(t, known)
+	require.True(t, hasStrong)
 }
 
 func TestOpenAIWSContinuationRuntimeSnapshot_UsesObservedTransportCapability(t *testing.T) {
