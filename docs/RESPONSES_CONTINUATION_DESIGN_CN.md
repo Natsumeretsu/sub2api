@@ -247,6 +247,13 @@ OpenAI 官方文档指向两个核心事实：
   - `turn_reuse_processing_conflict_total`
   - `turn_reuse_emitted_conflict_total`
   - `turn_reuse_completed_conflict_total`
+
+当前这些计数的语义已经进一步收紧：
+
+- `ws_to_http_mid_session_total`
+  现在只在“当前 turn 真的具备 response-bound continuation 锚点，且客户端 transport 实际落在 HTTP”时增长；仅仅是 `strong cohort` 或普通 sticky session，不再记成中途降级。
+- `account_switch_with_cache_drop_total`
+  现在只在“跨账号选择真的落地并继续执行”时增长；被本地 anchored cross-account block 拦下的尝试，会单独落到 `anchored_cross_account_switch_blocked_total`，不再污染真实切换计数。
   - fail-close 原因
   - stale anchor 对齐次数
   - self-contained retry 次数

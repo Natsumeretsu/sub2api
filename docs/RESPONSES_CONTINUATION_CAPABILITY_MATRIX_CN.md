@@ -146,6 +146,11 @@
 - `turn_reuse_processing_conflict`
 - `turn_reuse_emitted_conflict`
 - `turn_reuse_completed_conflict`
+- 当前计数语义补充：
+  - `ws_to_http_mid_session`
+    只统计真正具备 response-bound continuation 锚点的 HTTP 中途降级。
+  - `account_switch_with_cache_drop`
+    只统计真正落地的跨账号 continuation；被 anchored block 拦下的尝试单独记到 `anchored_cross_account_switch_blocked_total`。
 - `previous_response_not_found`：
   - `align_previous_response_id`
   - `drop_previous_response_id`
