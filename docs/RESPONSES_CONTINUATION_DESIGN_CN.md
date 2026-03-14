@@ -172,6 +172,7 @@ OpenAI 官方文档指向两个核心事实：
 - `session_hash -> last_response_id / turn_state` 从共享缓存回填本地时，使用共享剩余 TTL，而不是额外延长本地寿命
 - 当 `session_hash -> account_id` 粘连缺失，但 `session_hash -> last_response_id` 与 `response_id -> account_id` 仍可用时，优先从共享响应状态恢复 sticky account，并回填会话级粘连
 - HTTP 中途降级进入 `Responses(...)` 时，如果当前 turn 仍然是 response-bound continuation，handler 仍会优先从共享会话状态回填 `previous_response_id`；但账号选择阶段不再先把 `requiredTransport` 硬锁到 `WSv2`，而是允许选中同账号 HTTP candidate 后再判断该 surface 是否真的支持 `previous_response_id`
+- HTTP 中途降级时，`strong cohort` 不能再一律等同于 “必须保留 response-bound anchored continuation”。当前实现已把 **sticky-only 强会话** 与 **response-bound anchored turn** 分开：如果当前只是同账号会话亲和、但请求本身并未携带 `previous_response_id`，就不再因为 `strong cohort` 而把 HTTP 路径硬锁成 `WSv2-only`，同账号 degraded account 仍可被选中以保住缓存亲和和会话连续性
 - 对强 continuation cohort 的 HTTP 中途降级，不再默认静默剥离 `previous_response_id`；只有弱会话或明确不满足 anchored continuation 条件时才继续走旧的 strip 行为
 - `previous_response_id` 是否能在 HTTP fallback surface 上继续使用，必须单独建模，不能从 `WSv2` continuation capability 推导。当前 fork 会先吃账号显式声明，再吃静态默认，再对自定义 API-key surface 做 runtime probe：OpenAI OAuth passthrough HTTP surface 默认视为不支持，官方 OpenAI API-key surface 默认视为支持，第三方 API-key surface 以 probe 结果为准
 - 一旦请求仍然是 response-bound continuation，而当前选中的 HTTP fallback surface 又明确不支持 `previous_response_id`，handler 现在会直接返回显式 `503 Strong continuation is temporarily unavailable ...`；不会再先在 scheduler 阶段误报 `no available OpenAI accounts`，也不会把 anchored turn 继续发给 upstream 换回 `400 Unsupported parameter: previous_response_id`
@@ -203,7 +204,12 @@ OpenAI 官方文档指向两个核心事实：
   - `/responses` HTTP `previous_response_id` capability
   - `/responses/compact` HTTP `previous_response_id` capability
 - 当前 runtime smoke 已进一步确认：`RightCode` 与 `PackyCode` 都属于 `degraded-only`，但只有 `RightCode` 的 `/responses/compact` HTTP surface 已通过 runtime probe 被确认支持 `previous_response_id`；`PackyCode` 当前仍被归为 compact-incapable
+- `previous_response_id -> account` 的粘连现在被视为 **账号亲和提示**，而不是 `WSv2` 专属能力：即使 selected account 是 degraded-only，只要请求仍需要保住同账号 continuation/cache affinity，scheduler 仍会先按 response/account 绑定尝试命中该账号，再由后续 transport/capability 分层去判断是否允许保锚点、软中断，或继续走 degraded path
 - 如果继续把 “有锚点的 compact 请求” 强行按 `WSv2 strong cohort` 去调度，就会在 scheduler 阶段直接把 `RightCode` 筛空，表现成 `503 no available OpenAI accounts`
+- `compact capability` 也不能只靠 “route 存在 / 没报 `unsupported previous_response_id`” 做正面判断。当前 probe 已收紧成：
+  - `previous_response_not_found` 或明确 `2xx` 成功，才视为 anchored compact supported
+  - 普通 generic `4xx` 只说明 probe 被拒绝，不再被当成 supported
+  - 若 live compact 请求在 selected account 上直接命中 `Upstream compact stream disconnected before completion` 这类协议级 failfast，当前实现会把该账号记为 compact-incapable 观察值，并继续切到下一个候选，而不是继续在同一个坏账号上白烧 compact 尝试
 - 同样不能把“同一个 OAuth 账号既能走 WSv2 continuation”误当成“同一个 OAuth 账号的 HTTP fallback surface 也支持 `previous_response_id`”。2026-03-14 的 live 日志已经证明：same-account OAuth passthrough 也可能在 HTTP fallback 时直接返回 `Unsupported parameter: previous_response_id`
 - 因此当前设计已经把 capability 再拆成三层：`WS continuation capability` 负责能不能进入 strong cohort；`HTTP previous_response capability` 负责 anchored turn 能不能跨到普通 HTTP fallback；`remote compact previous_response capability` 负责 `/responses/compact` 能不能继续保锚点。前两层都不代表第三层
 
